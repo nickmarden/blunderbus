@@ -222,7 +222,7 @@ Search improvements (in order):
 - [x] MVV-LVA capture ordering (plans/mvv-lva.md)
 - [x] Killer move heuristic (plans/killer-moves.md)
 - [x] Null move pruning (plans/null-move-pruning.md)
-- [ ] Late move reductions / LMR (plans/late-move-reductions.md)
+- [x] Late move reductions / LMR (plans/late-move-reductions.md)
 
 Evaluation improvements (in order):
 - [x] Endgame phase detection + tapered king piece-square tables (plans/endgame-phase-eval.md)

@@ -194,17 +194,33 @@ fn negamax(
 
     let mut best_move: Option<Move> = None;
 
-    for mv in &moves {
+    for (move_index, mv) in moves.iter().enumerate() {
+        let is_quiet = !pos.bbs.occupancy().contains(mv.to)
+            && mv.kind != MoveKind::EnPassant
+            && !matches!(mv.kind, MoveKind::Promotion(_));
+        let is_killer = killers[ply_idx][0] == Some(*mv) || killers[ply_idx][1] == Some(*mv);
+
         let after = pos.make_move(mv);
         history.push(after.hash);
-        let score = -negamax(&after, depth - 1, -beta, -alpha, ply + 1, nodes, history, qdepth, tt, killers, false);
+
+        // Late Move Reductions: quiet non-killer moves late in the list are statistically
+        // unlikely to be best, so search them at reduced depth first. Only re-search at
+        // full depth if the reduced score raises alpha.
+        let score = if move_index >= 3 && depth >= 3 && !in_check && is_quiet && !is_killer {
+            let reduced = -negamax(&after, depth - 2, -alpha - 1, -alpha,
+                                   ply + 1, nodes, history, qdepth, tt, killers, false);
+            if reduced > alpha {
+                -negamax(&after, depth - 1, -beta, -alpha, ply + 1, nodes, history, qdepth, tt, killers, false)
+            } else {
+                reduced
+            }
+        } else {
+            -negamax(&after, depth - 1, -beta, -alpha, ply + 1, nodes, history, qdepth, tt, killers, false)
+        };
+
         history.pop();
 
         if score >= beta {
-            // Beta cutoff. If this was a quiet move, record it as a killer for this ply.
-            let is_quiet = !pos.bbs.occupancy().contains(mv.to)
-                && mv.kind != MoveKind::EnPassant
-                && !matches!(mv.kind, MoveKind::Promotion(_));
             if is_quiet {
                 killers[ply_idx][1] = killers[ply_idx][0];
                 killers[ply_idx][0] = Some(*mv);
@@ -499,6 +515,29 @@ mod tests {
         let result = search(&pos, 4, &[], 0, 1, None, &mut tt());
         assert!(result.best_move.is_some());
         assert!(result.score.abs() < 100, "kings-only should score near 0, got {}", result.score);
+    }
+
+    // --- Late move reduction tests ---
+
+    #[test]
+    fn lmr_does_not_miss_mate_in_one() {
+        // Mate-in-1 must still be found at depth 4 even when LMR is active.
+        let pos = Position::from_fen("6k1/5ppp/8/8/8/8/8/R5K1 w - - 0 1").unwrap();
+        let result = search(&pos, 4, &[], 0, 1, None, &mut tt());
+        assert!(result.best_move.is_some());
+        assert!(result.score >= MATE_SCORE - 10,
+            "mate-in-1 must still be found with LMR active, got {}", result.score);
+    }
+
+    #[test]
+    fn lmr_reduces_node_count_at_depth_5() {
+        // LMR + null move together should keep depth-5 nodes well under 200k on the
+        // starting position. Without either technique depth-5 is typically ~1M+ nodes.
+        let pos = Position::starting_position();
+        let result = search(&pos, 5, &[], 0, 1, None, &mut tt());
+        assert!(result.best_move.is_some());
+        assert!(result.nodes < 200_000,
+            "depth-5 nodes should be < 200k with LMR+null move, got {}", result.nodes);
     }
 
     #[test]

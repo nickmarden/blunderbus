@@ -126,7 +126,7 @@ class UCI:
         self.depth = depth
         self._debug = debug
         self._proc = subprocess.Popen(
-            [BLUNDERBUS_BIN, "--uci"],
+            [BLUNDERBUS_BIN, "--uci", "--depth", str(depth)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -209,7 +209,15 @@ class UCI:
                     parts = line.split()
                     if len(parts) >= 2 and parts[1] != "(none)":
                         return parts[1]
-            log.error("UCI bestmove timeout; got lines: %s", lines)
+            alive = self._proc.poll() is None
+            log.error(
+                "UCI bestmove timeout; process %s; got %d lines: %s",
+                "alive" if alive else f"dead (rc={self._proc.returncode})",
+                len(lines),
+                lines[:5],
+            )
+            if not alive:
+                log.error("UCI process died — check for a blunderbus panic/crash above")
             return None
 
     def quit(self):

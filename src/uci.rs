@@ -144,7 +144,7 @@ fn parse_go(tokens: &[&str], side: Color, default_depth: u32) -> GoParams {
     // `go movetime N` — spend exactly N ms
     if let Some(ms) = find_u64("movetime") {
         return GoParams {
-            max_depth: 99, // iterative deepening runs until deadline
+            max_depth: default_depth,
             deadline: Some(Instant::now() + Duration::from_millis(ms)),
         };
     }
@@ -159,7 +159,7 @@ fn parse_go(tokens: &[&str], side: Color, default_depth: u32) -> GoParams {
         let budget_ms = remaining_ms / 30 + inc_ms / 2;
         let budget_ms = budget_ms.max(50); // never spend less than 50ms
         return GoParams {
-            max_depth: 99,
+            max_depth: default_depth,
             deadline: Some(Instant::now() + Duration::from_millis(budget_ms)),
         };
     }
@@ -209,14 +209,14 @@ mod tests {
     #[test]
     fn parse_go_movetime_sets_deadline() {
         let p = parse_go(&["movetime", "500"], Color::White, 4);
-        assert_eq!(p.max_depth, 99);
+        assert_eq!(p.max_depth, 4);
         assert!(p.deadline.is_some());
     }
 
     #[test]
     fn parse_go_wtime_sets_deadline() {
         let p = parse_go(&["wtime", "60000", "btime", "60000"], Color::White, 4);
-        assert_eq!(p.max_depth, 99);
+        assert_eq!(p.max_depth, 4);
         assert!(p.deadline.is_some());
     }
 

@@ -392,7 +392,9 @@ def main():
                 if etype == "challenge":
                     ch = event["challenge"]
                     cid = ch["id"]
-                    if ch.get("direction") == "out":
+                    challenger_id = ch.get("challenger", {}).get("id", "")
+                    if (ch.get("direction") == "out"
+                            or challenger_id.lower() == me["id"].lower()):
                         log.debug("Ignoring outgoing challenge %s", cid)
                         continue
                     accept, reason = should_accept(ch, args.max_games, len(active_games))

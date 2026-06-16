@@ -28,40 +28,54 @@ Entry point. Calls `cli::run(options::CliOptions::from_args())`. Module declarat
 
 ### `src/types.rs`
 Primitive types shared across all modules.
-- `Color` (White/Black) with helpers: `opposite`, `pawn_start_rank`, `pawn_promotion_rank`,
-  `pawn_direction`, `back_rank`
-- `PieceKind` (Pawn/Knight/Bishop/Rook/Queen/King)
+- `Color` (White/Black) with `#[repr(usize)]`; helpers: `opposite`, `pawn_direction`, `back_rank`
+- `PieceKind` (Pawn/Knight/Bishop/Rook/Queen/King) with `#[repr(usize)]`
 - `Piece { color, kind }`
 - `Square(u8)` — index 0=a1 to 63=h8, layout `rank * 8 + file`
   - `from_file_rank(file, rank)`, `file()`, `rank()`, `index()`, `to_algebraic()`
 
 ### `src/board.rs`
-- `Board { squares: [Option<Piece>; 64] }` — mailbox representation
+- `Board { squares: [Option<Piece>; 64] }` — mailbox representation (retained for `make_move` and display)
 - `Board::empty()`, `get(sq)`, `set(sq, piece)`
 - `Board::from_fen_placement(s)` — parses the piece-placement field of a FEN string
 - `Display` impl: text grid with rank labels and `a b c d e f g h`
+
+### `src/bitboard.rs`
+Bitboard infrastructure. All hot-path code now reads from here rather than the mailbox.
+- File/rank masks: `FILE_A/B/G/H`, `RANK_1` through `RANK_8`
+- `ROOK_RAYS: [fn(Bitboard)->Bitboard; 4]` — N/S/E/W shift functions (shared by movegen + position)
+- `BISHOP_RAYS: [fn(Bitboard)->Bitboard; 4]` — NE/NW/SE/SW shift functions
+- `Bitboard(pub u64)` newtype with `EMPTY`/`FULL`; `from_square`, `contains`, `is_empty`, `popcount`,
+  `lsb` (non-destructive LSB read), `pop_lsb` (remove+return LSB), directional shifts
+- Operator overloads: `|`, `&`, `^`, `!` and assign variants
+- `knight_attacks() -> &'static [Bitboard; 64]` — precomputed via OnceLock (8 knight targets per square)
+- `king_attacks() -> &'static [Bitboard; 64]` — precomputed via OnceLock (≤8 king targets per square)
+- `BitboardSet { boards: [[Bitboard; 6]; 2] }` indexed by `[Color as usize][PieceKind as usize]`
+  - `from_board(&Board)`, `pieces(color, kind)`, `pieces_mut`, `color_occupancy`, `occupancy`, `piece_at`
 
 ### `src/position.rs`
 Full game state. The central struct passed everywhere.
 - `CastlingRights { white_kingside, white_queenside, black_kingside, black_queenside }`
   - `CastlingRights::none()`, `CastlingRights::all()`
-- `Position { board, side_to_move, castling, en_passant, halfmove_clock, fullmove_number, hash }`
+- `Position { board, bbs, side_to_move, castling, en_passant, halfmove_clock, fullmove_number, hash }`
+  - `bbs: BitboardSet` kept in sync with `board` after every `make_move`
   - `STARTING_FEN`, `STARTING_PLACEMENT_FEN` constants
   - `starting_position()`, `from_fen(s)`, `to_fen()`
-  - `make_move(mv) -> Position` — returns new position; immutable (no mutation)
-  - `compute_hash() -> u64` — full Zobrist recompute (called at end of `make_move`)
-  - `is_in_check(color) -> bool`
-  - `is_square_attacked(sq, by_color) -> bool` — attack-ray reversal
-- `update_castling_rights(pos, from, to)` — clears rights when king/rook moves or is captured on
-  its starting square
+  - `make_move(mv) -> Position` — returns new position; immutable; rebuilds `bbs` from `board`
+  - `compute_hash() -> u64` — Zobrist recompute via bitboard pop_lsb iteration
+  - `is_in_check(color) -> bool` — finds king via `bbs.pieces().lsb()`
+  - `is_square_attacked(sq, by_color) -> bool` — bitboard attack-table lookup + ray walks
+- `update_castling_rights(pos, from, to)` — clears rights when king/rook moves/is captured
 
 ### `src/movegen.rs`
 - `MoveKind`: `Normal | EnPassant | CastleKingside | CastleQueenside | Promotion(PieceKind)`
 - `Move { from: Square, to: Square, kind: MoveKind }` plus `Move::normal(from, to)`
 - `generate_legal_moves(pos) -> Vec<Move>` — filters pseudo-legal moves via make_move + is_in_check
-- `generate_pseudo_legal_moves(pos) -> Vec<Move>` — all moves following piece rules; may leave king in check
-- Per-piece generators: `gen_knight_moves`, `gen_king_moves`, `gen_ray_moves` (rook/bishop/queen),
-  `gen_pawn_moves` (single/double push, diagonal capture, en passant, promotion)
+- `generate_pseudo_legal_moves(pos) -> Vec<Move>` — iterates `bbs` per piece type; no mailbox reads
+- `gen_knight_moves`, `gen_king_moves` — bitboard lookup table + pop_lsb
+- `gen_slider_moves(pos, from, color, shifts, moves)` — ray walk using shift function array
+- `gen_pawn_moves_bb(pos, color, moves)` — bulk bitboard shift generator for all pawn move types
+- `QUEEN_RAYS: [fn(Bitboard)->Bitboard; 8]` — local constant combining ROOK_RAYS + BISHOP_RAYS
 - `push_promotions(from, to, moves)` — appends Q/R/B/N promotion variants
 - `perft(pos, depth) -> u64` — node count for move generator verification
 - `perft_divide(pos, depth)` — perft broken down by first move (for debugging)
@@ -82,49 +96,45 @@ Static evaluation from White's perspective (positive = White ahead, negative = B
   `QUEEN_TABLE`, `KING_TABLE` — written rank 8 (top) to rank 1 (bottom)
 
 ### `src/search.rs`
-- `SearchResult { best_move: Option<Move>, score: i32, depth: u32, nodes: u64 }`
+- `SearchResult { best_move: Option<Move>, score: i32, depth: u32, nodes: u64, candidates: Vec<(Move, i32)> }`
   - `score` is from the side-to-move's perspective at the root of the search
-- `pub fn search(pos, max_depth, game_history, qdepth) -> SearchResult`
-  - Iterative deepening from 1 to max_depth; accumulates node counts across depths
+  - `candidates`: top-N (move, score) pairs sorted best-first; used by `select_move` for strength control
+- `pub fn search(pos, max_depth, game_history, qdepth, n, deadline) -> SearchResult`
+  - `n`: number of top candidates to collect; `deadline: Option<Instant>` for time-based cutoff
+  - Iterative deepening from 1 to max_depth; breaks early if deadline passes
   - `game_history`: hashes of positions before the current one; used for repetition detection
-- `fn negamax_root(pos, depth, nodes, history, qdepth) -> (i32, Option<Move>)`
+- `fn negamax_root(pos, depth, nodes, history, qdepth) -> (i32, Option<Move>, Vec<(Move,i32)>)`
+  - Collects all root-move scores (alpha-beta at root has no cutoffs from -INF window)
 - `fn negamax(pos, depth, alpha, beta, ply, nodes, history, qdepth) -> i32`
   - Repetition: score 0 if pos.hash appears >= 2 times in history
   - At depth==0: calls `quiescence`; otherwise: move order, alpha-beta, beta cutoff, 50-move rule
 - `fn quiescence(pos, alpha, beta, nodes, qdepth) -> i32`
   - Stand-pat score as lower bound; explores captures/en passant/promotions only
   - Returns alpha (stand-pat) immediately when qdepth == 0
-  - Recurses with qdepth - 1 to cap search depth
-- `pub fn quiescence_eval(pos, qdepth) -> i32`
-  - Standalone quiescence from a position; returns White-perspective score
-  - Used for `--eval` display during human turn when no search has been run
-- `fn order_moves(pos, moves)` — captures before quiet moves (basic improvement to alpha-beta efficiency)
+- `pub fn quiescence_eval(pos, qdepth) -> i32` — standalone quiescence, White-perspective score
+- `fn order_moves(pos, moves)` — captures before quiet moves
 - `fn eval_from_stm(pos) -> i32` — wraps `evaluate()`, flips sign for Black to move
 
 ### `src/pgn.rs`
 PGN and SAN output for game export (paste into Lichess analysis, etc.).
 - `pub fn move_to_san(pos, mv) -> String` — Standard Algebraic Notation
-  - Castling: `O-O` / `O-O-O` (handled first, before piece lookup)
-  - Pawns: `e4`, `exd5`, `e8=Q` (file prefix on capture, `=X` on promotion)
-  - Pieces: `Nf3`, `Rxe1`, `Qxf7` plus disambiguation and check/checkmate suffixes
-  - Disambiguation: scans all legal moves for same piece type to same destination;
-    uses source file if unique, rank if unique, both if needed (3+ like pieces)
-  - Check/mate suffix: calls `make_move` then `is_in_check` + `generate_legal_moves`
+  - Castling: `O-O` / `O-O-O`; pawns: `e4`, `exd5`, `e8=Q`; pieces: `Nf3`, `Rxe1`
+  - Disambiguation + check/checkmate suffixes
 - `pub fn format_pgn(white, black, moves, result) -> String`
-  - 7-tag headers + move list (`1. e4 e5 2. Nf3 ...`) wrapped at `$COLUMNS` width (default 80)
-  - `result`: `"1-0"` / `"0-1"` / `"1/2-1/2"` / `"*"` (abandoned)
-- `fn disambiguate(pos, mv, kind, san)`, `fn check_suffix(pos)`, `fn piece_letter(kind)`,
-  `fn push_token(pgn, line, token, width)`
+  - 7-tag headers + move list wrapped at `$COLUMNS` width (default 80)
+- `fn disambiguate`, `fn check_suffix`, `fn piece_letter`, `fn push_token`
 
 ### `src/options.rs`
 CLI argument parsing from `std::env::args()`.
-- `CliOptions { show_eval, show_hint, depth, qdepth, pretty, auto, human_color, show_fen, show_pgn, no_clear_screen }`
+- `CliOptions { show_eval, show_hint, depth, qdepth, pretty, auto, human_color, show_fen, show_pgn, no_clear_screen, candidates, strength, uci }`
 - `CliOptions::from_args() -> CliOptions`
 
 | Flag | Default | Effect |
 |------|---------|--------|
 | `--depth N` / `-d N` | 4 | Negamax search depth (plies) |
 | `--qdepth N` | 6 | Quiescence depth cap (0 = disabled) |
+| `--candidates N` / `-n N` | 3 | Top-N moves to consider for strength randomization |
+| `--strength N` / `-s N` | 100 | 0-100; % chance to pick best move vs random from top-N |
 | `--eval` / `-e` | off | Show quiescence-stable eval after each move |
 | `--hint` / `-h` | off | Show suggested best move before human's prompt |
 | `--pretty` / `-p` | off | Unicode pieces + ANSI colored squares |
@@ -134,21 +144,27 @@ CLI argument parsing from `std::env::args()`.
 | `--fen` / `-f` | off | Print FEN string after every move |
 | `--pgn` | off | Print PGN transcript when the game ends |
 | `--no-clear-screen` | off | Suppress terminal clear in pretty mode |
+| `--uci` | off | Run in UCI protocol mode (stdin/stdout, for GUIs and Lichess bot) |
 
 ### `src/cli.rs`
 Interactive game loop and rendering.
-- `pub fn run(opts: CliOptions)` — labeled `'game: loop { ... }` that evaluates to the PGN result
-  string (`"1-0"`, `"0-1"`, `"1/2-1/2"`, or `"*"`) from every exit path
-- `san_moves: Vec<String>` accumulates SAN moves throughout the game for PGN output
-- `game_history: Vec<u64>` accumulates position hashes for repetition detection in search
-- CLS timing: human turn clears screen at top of loop; engine/auto turn clears after search,
-  before announcing the move (so the announcement and new board appear together)
-- Eval display: pulled from search result where available; `quiescence_eval` only as fallback for
-  human live play with neither `--hint` nor `--eval` active (unreachable in practice)
-- `render_position(pos, pretty)` — plain ASCII or colored Unicode board + game state line
-- `parse_move(input, legal) -> Result<Move, String>` — coordinate notation (`e2e4`, `e7e8q`)
-- `player_names(opts) -> (&str, &str)` — `(white, black)` for PGN headers
-- `move_label(mv) -> String` — coordinate notation for display
+- `pub fn run(opts: CliOptions)` — game loop; returns PGN result string
+- `san_moves: Vec<String>` accumulates SAN moves; `game_history: Vec<u64>` for repetition detection
+- `select_move(candidates, best, strength, rng) -> Move` — picks best move or random from top-N based on strength
+- `lcg_next(state: &mut u64) -> u64` — Knuth multiplicative LCG for strength randomization
+- `render_position(pos, pretty)` — plain ASCII or colored Unicode board
+- `pub(crate) fn parse_move(input, legal) -> Result<Move, String>` — coordinate notation
+- `pub(crate) fn move_label(mv) -> String` — coordinate notation for display
+
+### `src/uci.rs`
+UCI (Universal Chess Interface) protocol loop for GUI integration and Lichess bot API.
+- `pub fn run(opts: &CliOptions)` — reads stdin line by line; writes responses to stdout
+- Commands handled: `uci`, `isready`, `ucinewgame`, `position` (startpos/fen + moves), `go`, `stop`, `quit`
+- `parse_position(tokens) -> Option<(Position, Vec<u64>)>` — parses position + move history
+- `GoParams { max_depth: u32, deadline: Option<Instant> }`
+- `parse_go(tokens, side, default_depth) -> GoParams`
+  - `depth N`: fixed depth; `movetime N`: Instant deadline after N ms
+  - `wtime/btime/winc/binc`: time control; budget = `remaining/30 + inc/2` (min 50 ms)
 
 ---
 
@@ -156,20 +172,23 @@ Interactive game loop and rendering.
 
 ### Implemented
 
-- [x] Board: 8x8 mailbox (`[Option<Piece>; 64]`)
+- [x] Board: 8x8 mailbox (`[Option<Piece>; 64]`) + parallel `BitboardSet` (12 bitboards)
 - [x] FEN: full 6-field parse and serialize
 - [x] Move generation: all piece types, promotions, castling, en passant
 - [x] Legal move filtering (make_move + is_in_check)
-- [x] Attack detection: reverse-ray and reverse-offset lookup
+- [x] Attack detection: bitboard lookup tables + ray walks (knights, kings, sliders, pawns)
+- [x] Castling legality: king cannot castle out of, through, or into check
 - [x] Game state: castling rights, en passant, halfmove clock, fullmove number
 - [x] Zobrist hashing (deterministic, xorshift64)
 - [x] Threefold repetition detection (in search and game loop)
 - [x] 50-move rule (in search and game loop)
-- [x] Static evaluation: material + piece-square tables
+- [x] Static evaluation: material + piece-square tables (bitboard iteration)
 - [x] Search: negamax with alpha-beta pruning
-- [x] Iterative deepening (1 to max_depth)
+- [x] Iterative deepening (1 to max_depth) with optional time deadline
 - [x] Quiescence search with configurable depth cap (`--qdepth`, default 6)
 - [x] Basic move ordering: captures before quiet moves
+- [x] Top-N candidate collection at root (`--candidates`, default 3)
+- [x] Strength control (`--strength 0-100`): probabilistic best-vs-random-from-top-N selection
 - [x] Perft testing: verified correct at depth 1-3 (depth 4-5 exist, `#[ignore]` for speed)
 - [x] Human CLI: coordinate notation input, quit, hint, eval display
 - [x] Pretty rendering: Unicode pieces, ANSI colors, clear-screen between moves
@@ -177,22 +196,20 @@ Interactive game loop and rendering.
 - [x] FEN display after moves (`--fen`)
 - [x] Standard Algebraic Notation (SAN) conversion with disambiguation + check/mate suffixes
 - [x] PGN output at game end (`--pgn`), line-wrapped at `$COLUMNS`
+- [x] UCI protocol (`--uci`): position, go (depth/movetime/wtime+btime+inc), ucinewgame, quit
 
 ### Known Bugs
 
-- **Castling through check not detected**: pseudo-legal move generator allows castling even when the
-  king's path passes through an attacked square (f1/g1 for kingside, d1/c1 for queenside). Legal
-  move filtering only catches the king ending in check. Fix: check transit squares in `gen_king_moves`.
+None currently known.
 
 ### TODO
 
-- [ ] Fix castling through check (add `is_square_attacked` check for the king's transit squares)
-- [ ] Transposition table (hash map Zobrist hash -> score/move; major search speedup)
+- [ ] Transposition table (Zobrist hash → score/move; major search speedup)
 - [ ] Better move ordering: killer moves, history heuristic
-- [ ] UCI protocol (standard interface for Arena, Lichess bot, chess GUIs)
 - [ ] Evaluation improvements: king safety, passed pawns, open files, rook on seventh
 - [ ] Endgame detection and adjusted king evaluation (active king in endgame)
-- [ ] Bitboard representation (major rewrite; discuss architecture before starting)
+- [ ] Remove mailbox `Board` from `Position` (make_move still uses it; `bbs` is rebuilt each move)
+- [ ] Lichess bot deployment via Lichess Bot API + `--uci` mode
 - [ ] LLM experiment: board state as token sequence, move prediction as next-token generation
 
 ---

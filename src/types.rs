@@ -14,16 +14,6 @@ impl Color {
         }
     }
 
-    /// The rank index (0-7) where pawns of this color start.
-    pub fn pawn_start_rank(self) -> u8 {
-        match self { Color::White => 1, Color::Black => 6 }
-    }
-
-    /// The rank index (0-7) where pawns of this color promote.
-    pub fn pawn_promotion_rank(self) -> u8 {
-        match self { Color::White => 7, Color::Black => 0 }
-    }
-
     /// The direction pawns of this color move: +1 for White (up), -1 for Black (down).
     pub fn pawn_direction(self) -> i8 {
         match self { Color::White => 1, Color::Black => -1 }

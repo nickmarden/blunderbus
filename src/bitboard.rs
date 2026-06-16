@@ -16,6 +16,9 @@ pub const FILE_H: u64 = 0x8080_8080_8080_8080;
 pub const RANK_1: u64 = 0x0000_0000_0000_00FF;
 pub const RANK_2: u64 = 0x0000_0000_0000_FF00;
 pub const RANK_3: u64 = 0x0000_0000_00FF_0000;
+pub const RANK_4: u64 = 0x0000_0000_FF00_0000;
+pub const RANK_5: u64 = 0x0000_00FF_0000_0000;
+pub const RANK_6: u64 = 0x0000_FF00_0000_0000;
 pub const RANK_7: u64 = 0x00FF_0000_0000_0000;
 pub const RANK_8: u64 = 0xFF00_0000_0000_0000;
 

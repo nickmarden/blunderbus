@@ -1,6 +1,6 @@
-use crate::bitboard::{king_attacks, knight_attacks};
+use crate::bitboard::{king_attacks, knight_attacks, Bitboard, RANK_3, RANK_6};
 use crate::position::Position;
-use crate::types::{Color, Piece, PieceKind, Square};
+use crate::types::{Color, PieceKind, Square};
 
 /// The kind of move being made. Normal covers most moves; the others
 /// require special handling when the move is applied to a position.
@@ -56,11 +56,12 @@ pub fn generate_pseudo_legal_moves(pos: &Position) -> Vec<Move> {
                     PieceKind::Rook   => gen_rook_moves(pos, sq, color, &mut moves),
                     PieceKind::Bishop => gen_bishop_moves(pos, sq, color, &mut moves),
                     PieceKind::Queen  => gen_queen_moves(pos, sq, color, &mut moves),
-                    PieceKind::Pawn   => gen_pawn_moves(pos, sq, color, &mut moves),
+                    PieceKind::Pawn   => {} // handled below via bulk bitboard generator
                 }
             }
         }
     }
+    gen_pawn_moves_bb(pos, color, &mut moves);
 
     moves
 }
@@ -172,59 +173,121 @@ fn gen_queen_moves(pos: &Position, from: Square, color: Color, moves: &mut Vec<M
 
 // --- Pawns ---
 
-fn gen_pawn_moves(pos: &Position, from: Square, color: Color, moves: &mut Vec<Move>) {
-    let file = from.file() as i8;
-    let rank = from.rank() as i8;
+/// Generate all pawn moves for `color` using bitboard shift arithmetic.
+/// All single-push, double-push, diagonal capture, promotion, and en-passant
+/// moves are computed in bulk rather than per-pawn.
+fn gen_pawn_moves_bb(pos: &Position, color: Color, moves: &mut Vec<Move>) {
+    let pawns   = pos.bbs.pieces(color, PieceKind::Pawn);
+    let empty   = !pos.bbs.occupancy();
+    let opp_occ = pos.bbs.color_occupancy(color.opposite());
 
-    // White moves up (rank increases), Black moves down (rank decreases)
-    let dir = color.pawn_direction();
-    let start_rank = color.pawn_start_rank();
-    let promo_rank = color.pawn_promotion_rank();
+    match color {
+        Color::White => {
+            // Single pushes northward; save target set for double-push seed.
+            let single = pawns.north() & empty;
 
-    // Single push
-    let push_r = rank + dir;
-    if in_bounds(file, push_r) {
-        let push_sq = Square::from_file_rank(file as u8, push_r as u8);
-        if pos.board.get(push_sq).is_none() {
-            if push_sq.rank() == promo_rank {
-                push_promotions(from, push_sq, moves);
-            } else {
-                moves.push(Move::normal(from, push_sq));
+            let mut iter = single;
+            while !iter.is_empty() {
+                let to   = iter.pop_lsb();
+                let from = Square::new(to.index() - 8);
+                if to.rank() == 7 { push_promotions(from, to, moves); }
+                else               { moves.push(Move::normal(from, to)); }
+            }
 
-                // Double push from starting rank
-                let double_r = rank + dir * 2;
-                if from.rank() == start_rank && in_bounds(file, double_r) {
-                    let double_sq = Square::from_file_rank(file as u8, double_r as u8);
-                    if pos.board.get(double_sq).is_none() {
-                        moves.push(Move::normal(from, double_sq));
-                    }
+            // Double push: only pawns whose rank-3 square was empty (captured by `single`).
+            let mut dp = (single & Bitboard(RANK_3)).north() & empty;
+            while !dp.is_empty() {
+                let to   = dp.pop_lsb();
+                let from = Square::new(to.index() - 16);
+                moves.push(Move::normal(from, to));
+            }
+
+            // Northeast captures (file+1, rank+1 = index+9).
+            let mut ne = pawns.north_east() & opp_occ;
+            while !ne.is_empty() {
+                let to   = ne.pop_lsb();
+                let from = Square::new(to.index() - 9);
+                if to.rank() == 7 { push_promotions(from, to, moves); }
+                else               { moves.push(Move::normal(from, to)); }
+            }
+
+            // Northwest captures (file-1, rank+1 = index+7).
+            let mut nw = pawns.north_west() & opp_occ;
+            while !nw.is_empty() {
+                let to   = nw.pop_lsb();
+                let from = Square::new(to.index() - 7);
+                if to.rank() == 7 { push_promotions(from, to, moves); }
+                else               { moves.push(Move::normal(from, to)); }
+            }
+
+            // En passant.
+            if let Some(ep) = pos.en_passant {
+                let ep_bb = Bitboard::from_square(ep);
+                let mut ne = pawns.north_east() & ep_bb;
+                if !ne.is_empty() {
+                    let to = ne.pop_lsb();
+                    moves.push(Move { from: Square::new(to.index() - 9), to, kind: MoveKind::EnPassant });
+                }
+                let mut nw = pawns.north_west() & ep_bb;
+                if !nw.is_empty() {
+                    let to = nw.pop_lsb();
+                    moves.push(Move { from: Square::new(to.index() - 7), to, kind: MoveKind::EnPassant });
                 }
             }
         }
-    }
 
-    // Diagonal captures
-    for df in [-1i8, 1i8] {
-        let (cf, cr) = (file + df, rank + dir);
-        if !in_bounds(cf, cr) {
-            continue;
-        }
-        let cap_sq = Square::from_file_rank(cf as u8, cr as u8);
+        Color::Black => {
+            // Single pushes southward.
+            let single = pawns.south() & empty;
 
-        // Normal capture
-        if let Some(target) = pos.board.get(cap_sq) {
-            if target.color != color {
-                if cap_sq.rank() == promo_rank {
-                    push_promotions(from, cap_sq, moves);
-                } else {
-                    moves.push(Move::normal(from, cap_sq));
+            let mut iter = single;
+            while !iter.is_empty() {
+                let to   = iter.pop_lsb();
+                let from = Square::new(to.index() + 8);
+                if to.rank() == 0 { push_promotions(from, to, moves); }
+                else               { moves.push(Move::normal(from, to)); }
+            }
+
+            // Double push: only pawns whose rank-6 square was empty.
+            let mut dp = (single & Bitboard(RANK_6)).south() & empty;
+            while !dp.is_empty() {
+                let to   = dp.pop_lsb();
+                let from = Square::new(to.index() + 16);
+                moves.push(Move::normal(from, to));
+            }
+
+            // Southeast captures (file+1, rank-1 = index-7).
+            let mut se = pawns.south_east() & opp_occ;
+            while !se.is_empty() {
+                let to   = se.pop_lsb();
+                let from = Square::new(to.index() + 7);
+                if to.rank() == 0 { push_promotions(from, to, moves); }
+                else               { moves.push(Move::normal(from, to)); }
+            }
+
+            // Southwest captures (file-1, rank-1 = index-9).
+            let mut sw = pawns.south_west() & opp_occ;
+            while !sw.is_empty() {
+                let to   = sw.pop_lsb();
+                let from = Square::new(to.index() + 9);
+                if to.rank() == 0 { push_promotions(from, to, moves); }
+                else               { moves.push(Move::normal(from, to)); }
+            }
+
+            // En passant.
+            if let Some(ep) = pos.en_passant {
+                let ep_bb = Bitboard::from_square(ep);
+                let mut se = pawns.south_east() & ep_bb;
+                if !se.is_empty() {
+                    let to = se.pop_lsb();
+                    moves.push(Move { from: Square::new(to.index() + 7), to, kind: MoveKind::EnPassant });
+                }
+                let mut sw = pawns.south_west() & ep_bb;
+                if !sw.is_empty() {
+                    let to = sw.pop_lsb();
+                    moves.push(Move { from: Square::new(to.index() + 9), to, kind: MoveKind::EnPassant });
                 }
             }
-        }
-
-        // En passant
-        if Some(cap_sq) == pos.en_passant {
-            moves.push(Move { from, to: cap_sq, kind: MoveKind::EnPassant });
         }
     }
 }
@@ -274,6 +337,7 @@ pub fn perft_divide(pos: &Position, depth: u32) -> Vec<(String, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::Piece;
 
     fn starting_pos() -> Position {
         Position::starting_position()
@@ -375,5 +439,44 @@ mod tests {
         let moves = generate_legal_moves(&pos);
         assert!(!moves.iter().any(|m| m.kind == MoveKind::CastleKingside),
             "should not be able to castle while in check");
+    }
+
+    // Pawn move generation via bitboard shifts.
+
+    #[test]
+    fn pawn_promotion_generates_four_moves() {
+        // White pawn on e7 with nothing blocking — should generate 4 promotion moves.
+        let pos = Position::from_fen("8/4P3/8/8/8/8/8/4K2k w - - 0 1").unwrap();
+        let moves = generate_pseudo_legal_moves(&pos);
+        let promos: Vec<_> = moves.iter().filter(|m| matches!(m.kind, MoveKind::Promotion(_))).collect();
+        assert_eq!(promos.len(), 4, "e7-e8 should produce Q/R/B/N promotions");
+    }
+
+    #[test]
+    fn en_passant_capture_generated() {
+        // White pawn on e5, black pawn just double-pushed to d5, en-passant square is d6.
+        let pos = Position::from_fen("8/8/8/3pP3/8/8/8/4K2k w - d6 0 1").unwrap();
+        let moves = generate_pseudo_legal_moves(&pos);
+        assert!(moves.iter().any(|m| m.kind == MoveKind::EnPassant),
+            "en passant capture on d6 should be generated");
+    }
+
+    #[test]
+    fn pawn_blocked_cannot_push() {
+        // White pawn on e4 with a black piece on e5 — no push should be generated.
+        let pos = Position::from_fen("8/8/8/4p3/4P3/8/8/4K2k w - - 0 1").unwrap();
+        let sq = parse_sq("e4");
+        let moves = generate_pseudo_legal_moves(&pos);
+        assert!(!moves.iter().any(|m| m.from == sq), "blocked pawn on e4 should have no moves");
+    }
+
+    #[test]
+    fn black_pawn_double_push_from_start() {
+        // Black pawn on d7 with clear d6 and d5.
+        let pos = Position::from_fen("4k3/3p4/8/8/8/8/8/4K3 b - - 0 1").unwrap();
+        let sq = parse_sq("d7");
+        let moves = generate_pseudo_legal_moves(&pos);
+        let pawn_moves: Vec<_> = moves.iter().filter(|m| m.from == sq).collect();
+        assert_eq!(pawn_moves.len(), 2, "black d7 pawn should have single and double push");
     }
 }

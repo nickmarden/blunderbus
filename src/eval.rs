@@ -190,7 +190,7 @@ fn king_safety_penalty(pos: &Position, color: Color) -> i32 {
     penalty
 }
 
-fn material_value(kind: PieceKind) -> i32 {
+pub fn material_value(kind: PieceKind) -> i32 {
     match kind {
         PieceKind::Pawn   =>    100,
         PieceKind::Knight =>    320,

@@ -122,7 +122,7 @@ Static evaluation from White's perspective (positive = White ahead, negative = B
   - Stand-pat score as lower bound; explores captures/en passant/promotions only
   - Returns alpha (stand-pat) immediately when qdepth == 0
 - `pub fn quiescence_eval(pos, qdepth) -> i32` — standalone quiescence, White-perspective score
-- `fn order_moves(pos, moves)` — captures before quiet moves
+- `fn order_moves(pos, moves, tt_move)` — TT move first; captures by MVV-LVA score; promotions; quiet moves last
 - `fn eval_from_stm(pos) -> i32` — wraps `evaluate()`, flips sign for Black to move
 
 ### `src/pgn.rs`
@@ -197,7 +197,7 @@ UCI (Universal Chess Interface) protocol loop for GUI integration and Lichess bo
 - [x] Search: negamax with alpha-beta pruning
 - [x] Iterative deepening (1 to max_depth) with optional time deadline
 - [x] Quiescence search with configurable depth cap (`--qdepth`, default 6)
-- [x] Basic move ordering: captures before quiet moves
+- [x] Basic move ordering: captures before quiet moves, ordered by MVV-LVA within captures
 - [x] Top-N candidate collection at root (`--candidates`, default 3)
 - [x] Strength control (`--strength 0-100`): probabilistic best-vs-random-from-top-N selection
 - [x] Perft testing: verified correct at depth 1-3 (depth 4-5 exist, `#[ignore]` for speed)
@@ -215,11 +215,17 @@ None currently known.
 
 ### TODO
 
-- [ ] Better move ordering: killer moves, history heuristic
-- [x] Evaluation: passed pawns (plans/passed-pawns-eval.md)
-- [x] Evaluation: pawn structure — doubled/isolated pawns (plans/pawn-structure-eval.md)
-- [x] Evaluation: rook on open/semi-open file (plans/rook-open-file-eval.md)
-- [ ] Evaluation: endgame phase detection + adjusted piece-square tables (plans/endgame-phase-eval.md; implement last)
+Search improvements (in order):
+- [x] MVV-LVA capture ordering (plans/mvv-lva.md)
+- [ ] Killer move heuristic (plans/killer-moves.md)
+- [ ] Null move pruning (plans/null-move-pruning.md)
+- [ ] Late move reductions / LMR (plans/late-move-reductions.md)
+
+Evaluation improvements (in order):
+- [ ] Endgame phase detection + tapered piece-square tables (plans/endgame-phase-eval.md)
+- [ ] Mobility bonus for knights, bishops, rooks, queens (plans/mobility-eval.md)
+
+Long-term:
 - [ ] Remove mailbox `Board` from `Position` (make_move still uses it; `bbs` is rebuilt each move)
 - [ ] Lichess bot deployment via Lichess Bot API + `--uci` mode
 - [ ] LLM experiment: board state as token sequence, move prediction as next-token generation

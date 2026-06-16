@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use crate::eval::evaluate;
+use crate::eval::{evaluate, material_value};
 use crate::movegen::{generate_legal_moves, Move, MoveKind};
 use crate::position::Position;
 use crate::tt::{Bound, TranspositionTable};
@@ -224,9 +224,26 @@ fn eval_from_stm(pos: &Position) -> i32 {
 /// The TT move is typically the best move from a previous search at this position.
 fn order_moves(pos: &Position, moves: &mut Vec<Move>, tt_move: Option<Move>) {
     moves.sort_by_key(|mv| {
-        if tt_move == Some(*mv) { 0 }
-        else if pos.bbs.occupancy().contains(mv.to) || mv.kind == MoveKind::EnPassant { 1 }
-        else { 2 }
+        if tt_move == Some(*mv) {
+            return -1_000_000i32;
+        }
+        // Captures: scored by MVV-LVA (most valuable victim, least valuable attacker).
+        // Lower sort key = searched first.  PxQ (-8900) before QxP (-100).
+        if mv.kind == MoveKind::EnPassant {
+            // Pawn captures pawn en passant — both pawns worth 100 cp.
+            return -(100 * 10 - 100);
+        }
+        if pos.bbs.occupancy().contains(mv.to) {
+            let victim   = pos.bbs.piece_at(mv.to).map_or(0, |p| material_value(p.kind));
+            let attacker = pos.bbs.piece_at(mv.from).map_or(100, |p| material_value(p.kind));
+            return -(victim * 10 - attacker);
+        }
+        // Promotions are high-value quiet moves; try before ordinary quiet moves.
+        if matches!(mv.kind, MoveKind::Promotion(_)) {
+            return -800i32;
+        }
+        // Quiet moves last.
+        10_000i32
     });
 }
 
@@ -308,5 +325,65 @@ mod tests {
         let r2 = search(&pos, 4, &[], 0, 3, None, &mut tt);
         assert!(r2.nodes < r1.nodes,
             "warm TT should reduce node count: first={} second={}", r1.nodes, r2.nodes);
+    }
+
+    // --- MVV-LVA ordering tests ---
+
+    #[test]
+    fn mvv_lva_pxq_before_qxp() {
+        // White pawn on c5 can take Black queen on d6 (PxQ = great capture).
+        // White queen on h5 can take Black pawn on h4 (QxP = risky capture).
+        // MVV-LVA must order PxQ before QxP.
+        let pos = Position::from_fen("4k3/8/3q4/2P4Q/7p/8/8/4K3 w - - 0 1").unwrap();
+        let mut moves = generate_legal_moves(&pos);
+        order_moves(&pos, &mut moves, None);
+
+        let pxq = moves.iter().position(|mv| {
+            // c5=file2,rank4 captures d6=file3,rank5
+            mv.from == crate::types::Square::from_file_rank(2, 4)
+            && mv.to == crate::types::Square::from_file_rank(3, 5)
+        }).expect("PxQ move c5xd6 should exist");
+
+        let qxp = moves.iter().position(|mv| {
+            // h5=file7,rank4 captures h4=file7,rank3
+            mv.from == crate::types::Square::from_file_rank(7, 4)
+            && mv.to == crate::types::Square::from_file_rank(7, 3)
+        }).expect("QxP move h5xh4 should exist");
+
+        assert!(pxq < qxp, "PxQ (index {pxq}) should be ordered before QxP (index {qxp})");
+    }
+
+    #[test]
+    fn mvv_lva_captures_before_quiet() {
+        // All captures must appear before all quiet moves after ordering.
+        let pos = Position::from_fen("4k3/8/3q4/2P4Q/7p/8/8/4K3 w - - 0 1").unwrap();
+        let mut moves = generate_legal_moves(&pos);
+        order_moves(&pos, &mut moves, None);
+
+        let last_cap = moves.iter().rposition(|mv| {
+            pos.bbs.occupancy().contains(mv.to) || mv.kind == MoveKind::EnPassant
+        });
+        let first_quiet = moves.iter().position(|mv| {
+            !pos.bbs.occupancy().contains(mv.to)
+            && mv.kind != MoveKind::EnPassant
+            && !matches!(mv.kind, MoveKind::Promotion(_))
+        });
+
+        if let (Some(cap_idx), Some(quiet_idx)) = (last_cap, first_quiet) {
+            assert!(cap_idx < quiet_idx,
+                "last capture (index {cap_idx}) should precede first quiet move (index {quiet_idx})");
+        }
+    }
+
+    #[test]
+    fn mvv_lva_tt_move_is_first() {
+        // A TT move must be sorted before all captures.
+        let pos = Position::from_fen("4k3/8/3q4/2P4Q/7p/8/8/4K3 w - - 0 1").unwrap();
+        let moves_unsorted = generate_legal_moves(&pos);
+        // Pick any move as the "TT move".
+        let tt_move = moves_unsorted[moves_unsorted.len() - 1];
+        let mut moves = moves_unsorted;
+        order_moves(&pos, &mut moves, Some(tt_move));
+        assert_eq!(moves[0], tt_move, "TT move must be the first move tried");
     }
 }

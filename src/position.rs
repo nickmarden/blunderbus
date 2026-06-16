@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::bitboard::BitboardSet;
+use crate::bitboard::{king_attacks, knight_attacks, Bitboard, BitboardSet, BISHOP_RAYS, ROOK_RAYS};
 use crate::board::Board;
 use crate::movegen::{Move, MoveKind};
 use crate::types::{Color, Piece, PieceKind, Square};
@@ -190,87 +190,79 @@ impl Position {
         let z = zobrist::tables();
         let mut hash = 0u64;
 
-        for index in 0..64u8 {
-            if let Some(piece) = self.board.get(Square::new(index)) {
-                hash ^= z.piece_key(piece.kind, piece.color, index as usize);
+        for color in [Color::White, Color::Black] {
+            for kind in [PieceKind::Pawn, PieceKind::Knight, PieceKind::Bishop,
+                         PieceKind::Rook, PieceKind::Queen, PieceKind::King] {
+                let mut bb = self.bbs.pieces(color, kind);
+                while !bb.is_empty() {
+                    let sq = bb.pop_lsb();
+                    hash ^= z.piece_key(kind, color, sq.index() as usize);
+                }
             }
         }
 
-        if self.side_to_move == Color::Black {
-            hash ^= z.black_to_move;
-        }
-
+        if self.side_to_move == Color::Black { hash ^= z.black_to_move; }
         if self.castling.white_kingside  { hash ^= z.castling[0]; }
         if self.castling.white_queenside { hash ^= z.castling[1]; }
         if self.castling.black_kingside  { hash ^= z.castling[2]; }
         if self.castling.black_queenside { hash ^= z.castling[3]; }
-
-        if let Some(ep) = self.en_passant {
-            hash ^= z.en_passant[ep.file() as usize];
-        }
+        if let Some(ep) = self.en_passant { hash ^= z.en_passant[ep.file() as usize]; }
 
         hash
     }
 
     /// Returns true if the given color's king is in check.
     pub fn is_in_check(&self, color: Color) -> bool {
-        let king_sq = (0..64u8)
-            .map(Square::new)
-            .find(|&sq| self.board.get(sq) == Some(Piece::new(color, PieceKind::King)));
-        match king_sq {
-            Some(sq) => self.is_square_attacked(sq, color.opposite()),
-            None => false,
-        }
+        let king_bb = self.bbs.pieces(color, PieceKind::King);
+        if king_bb.is_empty() { return false; }
+        self.is_square_attacked(king_bb.lsb(), color.opposite())
     }
 
     /// Returns true if `sq` is attacked by any piece of color `by`.
-    /// Uses attack-ray reversal: looks outward from the square in each attack pattern.
+    /// Uses attack-ray reversal via bitboard lookups and shift walks.
     pub fn is_square_attacked(&self, sq: Square, by: Color) -> bool {
+        let bbs = &self.bbs;
+        let sq_bb = Bitboard::from_square(sq);
+        let any_occ = bbs.occupancy();
+
+        // Pawn attacks: reverse-direction check.
+        // A white pawn attacks diagonally northward; to check whether sq is attacked by
+        // a white pawn, look at the two squares diagonally below sq.
+        let pawn_sources = match by {
+            Color::White => sq_bb.south_east() | sq_bb.south_west(),
+            Color::Black => sq_bb.north_east() | sq_bb.north_west(),
+        };
+        if !(pawn_sources & bbs.pieces(by, PieceKind::Pawn)).is_empty() { return true; }
+
         // Knight attacks
-        for (df, dr) in KNIGHT_OFFSETS {
-            if let Some(from) = offset_sq(sq, df, dr) {
-                if self.board.get(from) == Some(Piece::new(by, PieceKind::Knight)) {
-                    return true;
-                }
-            }
-        }
-
-        // Rook / Queen attacks along orthogonal rays
-        for (df, dr) in ROOK_DIRS {
-            if ray_contains_attacker(&self.board, sq, df, dr, by, |k| {
-                k == PieceKind::Rook || k == PieceKind::Queen
-            }) {
-                return true;
-            }
-        }
-
-        // Bishop / Queen attacks along diagonal rays
-        for (df, dr) in BISHOP_DIRS {
-            if ray_contains_attacker(&self.board, sq, df, dr, by, |k| {
-                k == PieceKind::Bishop || k == PieceKind::Queen
-            }) {
-                return true;
-            }
-        }
-
-        // Pawn attacks: look one rank in the direction enemy pawns come FROM.
-        // A white pawn on (f, r) attacks (f±1, r+1), so to be attacked by a white pawn
-        // we look at (sq.file±1, sq.rank - 1) — one rank below sq.
-        let pawn_rank_offset = -by.pawn_direction();
-        for df in [-1i8, 1i8] {
-            if let Some(from) = offset_sq(sq, df, pawn_rank_offset) {
-                if self.board.get(from) == Some(Piece::new(by, PieceKind::Pawn)) {
-                    return true;
-                }
-            }
+        if !(knight_attacks()[sq.index() as usize] & bbs.pieces(by, PieceKind::Knight)).is_empty() {
+            return true;
         }
 
         // King attacks
-        for (df, dr) in KING_OFFSETS {
-            if let Some(from) = offset_sq(sq, df, dr) {
-                if self.board.get(from) == Some(Piece::new(by, PieceKind::King)) {
-                    return true;
-                }
+        if !(king_attacks()[sq.index() as usize] & bbs.pieces(by, PieceKind::King)).is_empty() {
+            return true;
+        }
+
+        // Rook/Queen (orthogonal rays)
+        let rq = bbs.pieces(by, PieceKind::Rook) | bbs.pieces(by, PieceKind::Queen);
+        for &ray in &ROOK_RAYS {
+            let mut cur = ray(sq_bb);
+            while !cur.is_empty() {
+                if !(cur & rq).is_empty() { return true; }
+                if !(cur & any_occ).is_empty() { break; }
+                cur = ray(cur);
+            }
+        }
+
+        // Bishop/Queen (diagonal rays)
+        let bq = bbs.pieces(by, PieceKind::Bishop) | bbs.pieces(by, PieceKind::Queen);
+        for &ray in &BISHOP_RAYS {
+            let mut cur = ray(sq_bb);
+            while !cur.is_empty() {
+                if !(cur & bq).is_empty() { return true; }
+                if !(cur & any_occ).is_empty() { break; }
+                cur = ray(cur);
             }
         }
 
@@ -325,58 +317,6 @@ impl Position {
 
         fen
     }
-}
-
-// --- Geometry constants (duplicated from movegen to avoid coupling) ---
-
-const KNIGHT_OFFSETS: [(i8, i8); 8] = [
-    (-2, -1), (-2, 1), (-1, -2), (-1, 2),
-    ( 1, -2), ( 1, 2), ( 2, -1), ( 2, 1),
-];
-
-const KING_OFFSETS: [(i8, i8); 8] = [
-    (-1, -1), (-1, 0), (-1, 1),
-    ( 0, -1),          ( 0, 1),
-    ( 1, -1), ( 1, 0), ( 1, 1),
-];
-
-const ROOK_DIRS:   [(i8, i8); 4] = [(0, 1), (0, -1), (1, 0), (-1, 0)];
-const BISHOP_DIRS: [(i8, i8); 4] = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
-
-// --- Helper functions ---
-
-fn offset_sq(sq: Square, df: i8, dr: i8) -> Option<Square> {
-    let f = sq.file() as i8 + df;
-    let r = sq.rank() as i8 + dr;
-    if (0..8).contains(&f) && (0..8).contains(&r) {
-        Some(Square::from_file_rank(f as u8, r as u8))
-    } else {
-        None
-    }
-}
-
-/// Walk a ray from `from` in direction (df, dr); return true if the first piece
-/// encountered belongs to `by` and satisfies `is_match`.
-///
-/// `impl Fn(PieceKind) -> bool` is Rust's way of accepting a closure as a parameter.
-/// The compiler monomorphizes this (like a C++ template), so there's no runtime overhead.
-fn ray_contains_attacker(
-    board: &Board,
-    from: Square,
-    df: i8, dr: i8,
-    by: Color,
-    is_match: impl Fn(PieceKind) -> bool,
-) -> bool {
-    let (mut f, mut r) = (from.file() as i8 + df, from.rank() as i8 + dr);
-    while (0..8).contains(&f) && (0..8).contains(&r) {
-        let sq = Square::from_file_rank(f as u8, r as u8);
-        if let Some(piece) = board.get(sq) {
-            return piece.color == by && is_match(piece.kind);
-        }
-        f += df;
-        r += dr;
-    }
-    false
 }
 
 fn update_castling_rights(pos: &mut Position, from: Square, to: Square) {

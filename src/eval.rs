@@ -6,14 +6,14 @@ use crate::types::{Color, PieceKind, Square};
 pub fn evaluate(pos: &Position) -> i32 {
     let mut score = 0i32;
 
-    for index in 0..64u8 {
-        let sq = Square::new(index);
-        if let Some(piece) = pos.board.get(sq) {
-            let value = material_value(piece.kind) + piece_square_bonus(piece.kind, piece.color, sq);
-            if piece.color == Color::White {
-                score += value;
-            } else {
-                score -= value;
+    for color in [Color::White, Color::Black] {
+        let sign = if color == Color::White { 1 } else { -1 };
+        for kind in [PieceKind::Pawn, PieceKind::Knight, PieceKind::Bishop,
+                     PieceKind::Rook, PieceKind::Queen, PieceKind::King] {
+            let mut bb = pos.bbs.pieces(color, kind);
+            while !bb.is_empty() {
+                let sq = bb.pop_lsb();
+                score += sign * (material_value(kind) + piece_square_bonus(kind, color, sq));
             }
         }
     }

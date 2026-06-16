@@ -1,4 +1,4 @@
-use crate::bitboard::{king_attacks, knight_attacks, Bitboard, RANK_3, RANK_6};
+use crate::bitboard::{king_attacks, knight_attacks, Bitboard, BISHOP_RAYS, ROOK_RAYS, RANK_3, RANK_6};
 use crate::position::Position;
 use crate::types::{Color, PieceKind, Square};
 
@@ -41,26 +41,26 @@ pub fn generate_legal_moves(pos: &Position) -> Vec<Move> {
 
 /// Generate all pseudo-legal moves for the side to move.
 /// Pseudo-legal means moves follow piece rules but may leave the king in check.
-/// Legality filtering happens in generate_legal_moves (not yet implemented).
 pub fn generate_pseudo_legal_moves(pos: &Position) -> Vec<Move> {
     let mut moves = Vec::new();
     let color = pos.side_to_move;
 
-    for index in 0..64u8 {
-        let sq = Square::new(index);
-        if let Some(piece) = pos.board.get(sq) {
-            if piece.color == color {
-                match piece.kind {
-                    PieceKind::Knight => gen_knight_moves(pos, sq, color, &mut moves),
-                    PieceKind::King   => gen_king_moves(pos, sq, color, &mut moves),
-                    PieceKind::Rook   => gen_rook_moves(pos, sq, color, &mut moves),
-                    PieceKind::Bishop => gen_bishop_moves(pos, sq, color, &mut moves),
-                    PieceKind::Queen  => gen_queen_moves(pos, sq, color, &mut moves),
-                    PieceKind::Pawn   => {} // handled below via bulk bitboard generator
-                }
-            }
-        }
-    }
+    // Iterate each piece type via its bitboard — no mailbox reads needed.
+    let mut bb = pos.bbs.pieces(color, PieceKind::Knight);
+    while !bb.is_empty() { gen_knight_moves(pos, bb.pop_lsb(), color, &mut moves); }
+
+    let mut bb = pos.bbs.pieces(color, PieceKind::King);
+    while !bb.is_empty() { gen_king_moves(pos, bb.pop_lsb(), color, &mut moves); }
+
+    let mut bb = pos.bbs.pieces(color, PieceKind::Rook);
+    while !bb.is_empty() { gen_rook_moves(pos, bb.pop_lsb(), color, &mut moves); }
+
+    let mut bb = pos.bbs.pieces(color, PieceKind::Bishop);
+    while !bb.is_empty() { gen_bishop_moves(pos, bb.pop_lsb(), color, &mut moves); }
+
+    let mut bb = pos.bbs.pieces(color, PieceKind::Queen);
+    while !bb.is_empty() { gen_queen_moves(pos, bb.pop_lsb(), color, &mut moves); }
+
     gen_pawn_moves_bb(pos, color, &mut moves);
 
     moves
@@ -96,11 +96,13 @@ fn gen_king_moves(pos: &Position, from: Square, color: Color, moves: &mut Vec<Mo
         Color::Black => (rights.black_kingside, rights.black_queenside),
     };
 
+    let occ = pos.bbs.occupancy();
+
     if can_kingside {
         let f1 = Square::from_file_rank(5, back_rank);
         let g1 = Square::from_file_rank(6, back_rank);
-        if pos.board.get(f1).is_none()
-            && pos.board.get(g1).is_none()
+        if !occ.contains(f1)
+            && !occ.contains(g1)
             && !pos.is_square_attacked(from, opp)
             && !pos.is_square_attacked(f1, opp)
             && !pos.is_square_attacked(g1, opp)
@@ -113,9 +115,9 @@ fn gen_king_moves(pos: &Position, from: Square, color: Color, moves: &mut Vec<Mo
         let b1 = Square::from_file_rank(1, back_rank);
         let c1 = Square::from_file_rank(2, back_rank);
         let d1 = Square::from_file_rank(3, back_rank);
-        if pos.board.get(b1).is_none()
-            && pos.board.get(c1).is_none()
-            && pos.board.get(d1).is_none()
+        if !occ.contains(b1)
+            && !occ.contains(c1)
+            && !occ.contains(d1)
             && !pos.is_square_attacked(from, opp)
             && !pos.is_square_attacked(d1, opp)
             && !pos.is_square_attacked(c1, opp)
@@ -127,15 +129,9 @@ fn gen_king_moves(pos: &Position, from: Square, color: Color, moves: &mut Vec<Mo
 
 // --- Sliding pieces ---
 
-// Each array holds the bitboard shift functions for that piece's movement directions.
-// Shift functions handle edge masking internally (east/west mask FILE_H/FILE_A before shifting).
-const ROOK_SHIFTS:   [fn(Bitboard) -> Bitboard; 4] = [
-    Bitboard::north, Bitboard::south, Bitboard::east, Bitboard::west,
-];
-const BISHOP_SHIFTS: [fn(Bitboard) -> Bitboard; 4] = [
-    Bitboard::north_east, Bitboard::north_west, Bitboard::south_east, Bitboard::south_west,
-];
-const QUEEN_SHIFTS:  [fn(Bitboard) -> Bitboard; 8] = [
+// ROOK_RAYS and BISHOP_RAYS are imported from bitboard.rs and shared with position.rs.
+// Queen moves combine both direction sets.
+const QUEEN_RAYS: [fn(Bitboard) -> Bitboard; 8] = [
     Bitboard::north, Bitboard::south, Bitboard::east, Bitboard::west,
     Bitboard::north_east, Bitboard::north_west, Bitboard::south_east, Bitboard::south_west,
 ];
@@ -164,15 +160,15 @@ fn gen_slider_moves(
 }
 
 fn gen_rook_moves(pos: &Position, from: Square, color: Color, moves: &mut Vec<Move>) {
-    gen_slider_moves(pos, from, color, &ROOK_SHIFTS, moves);
+    gen_slider_moves(pos, from, color, &ROOK_RAYS, moves);
 }
 
 fn gen_bishop_moves(pos: &Position, from: Square, color: Color, moves: &mut Vec<Move>) {
-    gen_slider_moves(pos, from, color, &BISHOP_SHIFTS, moves);
+    gen_slider_moves(pos, from, color, &BISHOP_RAYS, moves);
 }
 
 fn gen_queen_moves(pos: &Position, from: Square, color: Color, moves: &mut Vec<Move>) {
-    gen_slider_moves(pos, from, color, &QUEEN_SHIFTS, moves);
+    gen_slider_moves(pos, from, color, &QUEEN_RAYS, moves);
 }
 
 // --- Pawns ---

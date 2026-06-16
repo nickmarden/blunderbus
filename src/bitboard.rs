@@ -78,6 +78,18 @@ impl std::ops::BitOrAssign  for Bitboard { fn bitor_assign(&mut self,  r: Self) 
 impl std::ops::BitAndAssign for Bitboard { fn bitand_assign(&mut self, r: Self) { self.0 &=  r.0; } }
 impl std::ops::BitXorAssign for Bitboard { fn bitxor_assign(&mut self, r: Self) { self.0 ^=  r.0; } }
 
+// --- Direction shift arrays ---
+
+/// The four orthogonal ray directions used by rooks and queens.
+pub const ROOK_RAYS: [fn(Bitboard) -> Bitboard; 4] = [
+    Bitboard::north, Bitboard::south, Bitboard::east, Bitboard::west,
+];
+
+/// The four diagonal ray directions used by bishops and queens.
+pub const BISHOP_RAYS: [fn(Bitboard) -> Bitboard; 4] = [
+    Bitboard::north_east, Bitboard::north_west, Bitboard::south_east, Bitboard::south_west,
+];
+
 // --- Precomputed attack tables ---
 
 /// Knight attack mask for each square.

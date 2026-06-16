@@ -62,7 +62,7 @@ pub fn run(opts: CliOptions) {
         if pos.side_to_move == opts.human_color {
             if opts.auto {
                 // Auto mode: engine picks the human's move too.
-                let result = search(&pos, opts.depth, &game_history, opts.qdepth);
+                let result = search(&pos, opts.depth, &game_history, opts.qdepth, opts.candidates);
                 let mv = result.best_move.expect("legal moves exist but search returned none");
                 if opts.pretty && !opts.no_clear_screen {
                     print!("\x1b[H\x1b[2J");
@@ -84,7 +84,7 @@ pub fn run(opts: CliOptions) {
                         print!("Hint: thinking...");
                         io::stdout().flush().ok();
                     }
-                    let r = search(&pos, opts.depth, &game_history, opts.qdepth);
+                    let r = search(&pos, opts.depth, &game_history, opts.qdepth, opts.candidates);
                     if opts.show_hint {
                         print!("\r                  \r"); // erase "Hint: thinking..."
                         io::stdout().flush().ok();
@@ -137,7 +137,7 @@ pub fn run(opts: CliOptions) {
             // Engine turn
             print!("Engine thinking...");
             io::stdout().flush().ok();
-            let result = search(&pos, opts.depth, &game_history, opts.qdepth);
+            let result = search(&pos, opts.depth, &game_history, opts.qdepth, opts.candidates);
             println!();
 
             if opts.pretty && !opts.no_clear_screen {

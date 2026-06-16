@@ -11,6 +11,9 @@ pub struct SearchResult {
     pub score: i32,
     pub depth: u32,
     pub nodes: u64,
+    /// Top-N moves with scores (side-to-move perspective), sorted best-first.
+    /// Populated at the final depth of iterative deepening.
+    pub candidates: Vec<(Move, i32)>,
 }
 
 /// Run quiescence search from the current position and return the score from White's perspective.
@@ -22,9 +25,9 @@ pub fn quiescence_eval(pos: &Position, qdepth: u32) -> i32 {
 }
 
 /// Search to `max_depth` using iterative deepening with alpha-beta pruning.
-/// Returns the best move found and its score from the side-to-move's perspective.
-pub fn search(pos: &Position, max_depth: u32, game_history: &[u64], qdepth: u32) -> SearchResult {
-    let mut result = SearchResult { best_move: None, score: 0, depth: 0, nodes: 0 };
+/// Returns the best move found, its score (side-to-move perspective), and the top `n` candidates.
+pub fn search(pos: &Position, max_depth: u32, game_history: &[u64], qdepth: u32, n: usize) -> SearchResult {
+    let mut result = SearchResult { best_move: None, score: 0, depth: 0, nodes: 0, candidates: Vec::new() };
 
     // Build the base history: all game positions so far, plus the current position.
     // Each depth iteration gets a fresh clone so push/pop doesn't bleed between depths.
@@ -34,28 +37,29 @@ pub fn search(pos: &Position, max_depth: u32, game_history: &[u64], qdepth: u32)
     for depth in 1..=max_depth {
         let mut nodes = 0u64;
         let mut history = base_history.clone();
-        let (score, mv) = negamax_root(pos, depth, &mut nodes, &mut history, qdepth);
+        let (score, mv, cands) = negamax_root(pos, depth, &mut nodes, &mut history, qdepth, n);
         result.best_move = mv;
         result.score = score;
         result.depth = depth;
         result.nodes += nodes;
+        result.candidates = cands; // final depth wins
     }
 
     result
 }
 
-/// Root call: like negamax but also tracks which move produced the best score.
-fn negamax_root(pos: &Position, depth: u32, nodes: &mut u64, history: &mut Vec<u64>, qdepth: u32) -> (i32, Option<Move>) {
+/// Root call: scores every legal move, returns the best move and the top-n candidates sorted best-first.
+fn negamax_root(pos: &Position, depth: u32, nodes: &mut u64, history: &mut Vec<u64>, qdepth: u32, n: usize) -> (i32, Option<Move>, Vec<(Move, i32)>) {
     let mut moves = generate_legal_moves(pos);
 
     if moves.is_empty() {
         let score = if pos.is_in_check(pos.side_to_move) { -MATE_SCORE } else { 0 };
-        return (score, None);
+        return (score, None, Vec::new());
     }
 
     order_moves(pos, &mut moves);
 
-    let mut best_move: Option<Move> = None;
+    let mut scored: Vec<(Move, i32)> = Vec::with_capacity(moves.len());
     let mut alpha = -INFINITY;
 
     for mv in &moves {
@@ -63,13 +67,18 @@ fn negamax_root(pos: &Position, depth: u32, nodes: &mut u64, history: &mut Vec<u
         history.push(after.hash);
         let score = -negamax(&after, depth - 1, -INFINITY, -alpha, 1, nodes, history, qdepth);
         history.pop();
+        scored.push((*mv, score));
         if score > alpha {
             alpha = score;
-            best_move = Some(*mv);
         }
     }
 
-    (alpha, best_move)
+    // Sort best-first; stable so tied moves stay in generation order.
+    scored.sort_by(|a, b| b.1.cmp(&a.1));
+    let best_move = scored.first().map(|(mv, _)| *mv);
+    scored.truncate(n);
+
+    (alpha, best_move, scored)
 }
 
 /// Negamax with alpha-beta pruning.
@@ -197,7 +206,7 @@ mod tests {
     #[test]
     fn starting_position_returns_a_move() {
         let pos = Position::starting_position();
-        let result = search(&pos, 2, &[], 6);
+        let result = search(&pos, 2, &[], 6, 3);
         assert!(result.best_move.is_some());
     }
 
@@ -207,7 +216,7 @@ mod tests {
         let pos = Position::from_fen(
             "r1bqkb1r/pppp1Qpp/2n2n2/4p3/2B1P3/8/PPPP1PPP/RNB1K1NR b KQkq - 0 4"
         ).unwrap();
-        let result = search(&pos, 1, &[], 6);
+        let result = search(&pos, 1, &[], 6, 3);
         assert!(result.best_move.is_none());
         assert!(result.score <= -MATE_SCORE + 10);
     }
@@ -217,11 +226,45 @@ mod tests {
         // White Ra1, Kg1 vs Black Kg8 with pawns on f7/g7/h7 — Ra8 is checkmate.
         // Requires depth=2: one ply for White's move, one more to detect Black has no reply.
         let pos = Position::from_fen("6k1/5ppp/8/8/8/8/8/R5K1 w - - 0 1").unwrap();
-        let result = search(&pos, 2, &[], 6);
+        let result = search(&pos, 2, &[], 6, 3);
         assert!(result.best_move.is_some());
         // Score should indicate we deliver checkmate — much higher than any material score
         assert!(result.score >= MATE_SCORE - 10,
             "expected mate score, got {}", result.score);
+    }
+
+    #[test]
+    fn candidates_sorted_best_first() {
+        let pos = Position::starting_position();
+        let result = search(&pos, 2, &[], 6, 3);
+        let cands = &result.candidates;
+        assert!(!cands.is_empty(), "should have at least one candidate");
+        assert_eq!(cands[0].0, result.best_move.unwrap(), "first candidate must be the best move");
+        for i in 1..cands.len() {
+            assert!(cands[i].1 <= cands[i - 1].1, "candidates must be sorted best-first");
+        }
+    }
+
+    #[test]
+    fn candidates_truncated_to_n() {
+        let pos = Position::starting_position();
+        let result = search(&pos, 2, &[], 6, 3);
+        assert!(result.candidates.len() <= 3, "should have at most 3 candidates");
+    }
+
+    #[test]
+    fn candidates_fewer_than_n_when_few_legal_moves() {
+        // Only one legal move: king must capture the attacker.
+        // White Ke1, Black Ra2 + Rb2 giving check — Kd1/Kf1 both covered, must take on a2 or b2...
+        // Simpler: use a position with exactly 1 legal move.
+        // White king on a1, Black rooks on b3+c2 — king must go to a2 (only legal move... let's verify)
+        // Actually let's just use the mate-in-one position from above where there's exactly 1 winning move
+        // and confirm candidates.len() == legal_moves.len() when legal < n.
+        // Use a very constrained position: White Kg1, Rook a1 vs Black Kh8 — Black has few moves
+        let pos = Position::from_fen("7k/8/8/8/8/8/8/R5K1 b - - 0 1").unwrap();
+        let result = search(&pos, 1, &[], 0, 5);
+        let legal = crate::movegen::generate_legal_moves(&pos);
+        assert_eq!(result.candidates.len(), legal.len().min(5));
     }
 
     #[test]
@@ -231,7 +274,7 @@ mod tests {
         // Actually let's use: White Kc6, Qd6, Black Ka8 — Black to move, stalemate
         let pos = Position::from_fen("k7/8/KQK5/8/8/8/8/8 b - - 0 1").unwrap();
         // If this is actually stalemate, search returns no move and score 0
-        let result = search(&pos, 1, &[], 6);
+        let result = search(&pos, 1, &[], 6, 3);
         if result.best_move.is_none() {
             assert_eq!(result.score, 0, "stalemate should score 0");
         }

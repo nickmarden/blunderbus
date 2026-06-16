@@ -23,6 +23,8 @@ pub struct CliOptions {
     pub no_clear_screen: bool,
     /// Quiescence search depth cap (0 = disabled, default 6).
     pub qdepth: u32,
+    /// How many top candidate moves to retain after search (default 3).
+    pub candidates: usize,
 }
 
 impl CliOptions {
@@ -47,6 +49,11 @@ impl CliOptions {
             .and_then(|w| w[1].parse::<u32>().ok())
             .unwrap_or(6);
 
+        let candidates = args.windows(2)
+            .find(|w| w[0] == "--candidates" || w[0] == "-c")
+            .and_then(|w| w[1].parse::<usize>().ok())
+            .unwrap_or(3);
+
         let human_color = if args.iter().any(|a| a == "--black") {
             Color::Black
         } else if args.iter().any(|a| a == "--random-color") {
@@ -56,6 +63,6 @@ impl CliOptions {
             Color::White
         };
 
-        CliOptions { show_eval, show_hint, depth, qdepth, pretty, auto, human_color, show_fen, show_pgn, no_clear_screen }
+        CliOptions { show_eval, show_hint, depth, qdepth, candidates, pretty, auto, human_color, show_fen, show_pgn, no_clear_screen }
     }
 }

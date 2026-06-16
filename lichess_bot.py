@@ -122,50 +122,57 @@ class LichessAPI:
 # ---------------------------------------------------------------------------
 
 class UCI:
-    def __init__(self, depth: int):
+    def __init__(self, depth: int, debug: bool = False):
         self.depth = depth
+        self._debug = debug
         self._proc = subprocess.Popen(
             [BLUNDERBUS_BIN, "--uci"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
         )
         self._lock = threading.Lock()
+        self._q: queue.Queue = queue.Queue()
+        # Single persistent reader thread — avoids orphaned threads stealing lines.
+        self._reader_thread = threading.Thread(target=self._pump, daemon=True)
+        self._reader_thread.start()
+        self._stderr_thread = threading.Thread(target=self._pump_stderr, daemon=True)
+        self._stderr_thread.start()
         self._send("uci")
         self._wait_for("uciok")
         self._send("isready")
         self._wait_for("readyok")
 
+    def _pump(self):
+        for line in self._proc.stdout:
+            stripped = line.rstrip("\n")
+            if self._debug:
+                log.debug("UCI< %s", stripped)
+            self._q.put(stripped)
+
+    def _pump_stderr(self):
+        for line in self._proc.stderr:
+            log.warning("UCI stderr: %s", line.rstrip("\n"))
+
     def _send(self, cmd: str):
+        if self._debug:
+            log.debug("UCI> %s", cmd)
         self._proc.stdin.write(cmd + "\n")
         self._proc.stdin.flush()
 
     def _readline(self, timeout: float = 30.0) -> str | None:
-        """Read one line with a deadline (uses a background thread)."""
-        result: list[str] = []
-        done = threading.Event()
-
-        def reader():
-            try:
-                line = self._proc.stdout.readline()
-                result.append(line.rstrip("\n"))
-            except Exception:
-                pass
-            done.set()
-
-        t = threading.Thread(target=reader, daemon=True)
-        t.start()
-        if not done.wait(timeout):
+        try:
+            return self._q.get(timeout=timeout)
+        except queue.Empty:
             return None
-        return result[0] if result else None
 
     def _wait_for(self, keyword: str, timeout: float = 10.0) -> list[str]:
         lines = []
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            line = self._readline(timeout=max(0.1, deadline - time.monotonic()))
+            line = self._readline(timeout=max(0.05, deadline - time.monotonic()))
             if line is None:
                 break
             lines.append(line)
@@ -185,7 +192,12 @@ class UCI:
             self._send("ucinewgame")
             self._send(f"position {fen_or_moves}")
 
-            if wtime is not None and btime is not None:
+            INT32_MAX = 2_147_483_647
+            has_clock = (
+                wtime is not None and btime is not None
+                and wtime < INT32_MAX and btime < INT32_MAX
+            )
+            if has_clock:
                 go = f"go wtime {wtime} btime {btime} winc {winc} binc {binc}"
             else:
                 go = f"go depth {self.depth}"
@@ -197,6 +209,7 @@ class UCI:
                     parts = line.split()
                     if len(parts) >= 2 and parts[1] != "(none)":
                         return parts[1]
+            log.error("UCI bestmove timeout; got lines: %s", lines)
             return None
 
     def quit(self):
@@ -212,12 +225,12 @@ class UCI:
 # ---------------------------------------------------------------------------
 
 class GameHandler:
-    def __init__(self, api: LichessAPI, game_id: str, bot_color: str, depth: int):
+    def __init__(self, api: LichessAPI, game_id: str, bot_color: str, depth: int, debug: bool = False):
         self.api = api
         self.game_id = game_id
         self.bot_color = bot_color  # "white" or "black"
         self.depth = depth
-        self.uci = UCI(depth)
+        self.uci = UCI(depth, debug=debug)
         self.moves: list[str] = []  # accumulated UCI moves from root
         self._done = False
 
@@ -323,7 +336,11 @@ def main():
     parser.add_argument("--token", help="Lichess OAuth token (overrides .env)")
     parser.add_argument("--depth", type=int, default=4, help="Search depth (default 4)")
     parser.add_argument("--max-games", type=int, default=4, help="Max concurrent games")
+    parser.add_argument("--debug", action="store_true", help="Log every UCI line sent/received")
     args = parser.parse_args()
+
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
 
     token = load_token(args.token)
     api = LichessAPI(token)
@@ -341,7 +358,7 @@ def main():
     active_games: dict[str, threading.Thread] = {}
 
     def start_game(game_id: str, color: str):
-        handler = GameHandler(api, game_id, color, args.depth)
+        handler = GameHandler(api, game_id, color, args.depth, debug=args.debug)
         t = threading.Thread(target=handler.run, name=f"game-{game_id}", daemon=True)
         t.start()
         active_games[game_id] = t

@@ -43,6 +43,7 @@ Primitive types shared across all modules.
 ### `src/bitboard.rs`
 Bitboard infrastructure. All hot-path code now reads from here rather than the mailbox.
 - File/rank masks: `FILE_A/B/G/H`, `RANK_1` through `RANK_8`
+- `file_mask(file: u8) -> Bitboard` — full-file mask for any file index 0–7
 - `ROOK_RAYS: [fn(Bitboard)->Bitboard; 4]` — N/S/E/W shift functions (shared by movegen + position)
 - `BISHOP_RAYS: [fn(Bitboard)->Bitboard; 4]` — NE/NW/SE/SW shift functions
 - `Bitboard(pub u64)` newtype with `EMPTY`/`FULL`; `from_square`, `contains`, `is_empty`, `popcount`,
@@ -88,12 +89,14 @@ Full game state. The central struct passed everywhere.
 
 ### `src/eval.rs`
 Static evaluation from White's perspective (positive = White ahead, negative = Black ahead).
-- `pub fn evaluate(pos) -> i32` — material + piece-square table bonuses
+- `pub fn evaluate(pos) -> i32` — material + piece-square table bonuses + king safety
 - `material_value(kind) -> i32`: Pawn=100, Knight=320, Bishop=330, Rook=500, Queen=900, King=20000
 - `piece_square_bonus(kind, color, sq) -> i32` — indexes into per-piece tables from the piece's
   own perspective (White tables flip the rank index for Black)
 - Six `[i32; 64]` tables: `PAWN_TABLE`, `KNIGHT_TABLE`, `BISHOP_TABLE`, `ROOK_TABLE`,
   `QUEEN_TABLE`, `KING_TABLE` — written rank 8 (top) to rank 1 (bottom)
+- `king_safety_penalty(pos, color) -> i32` — pawn shield (-20 missing / -10 advanced per file)
+  + open/semi-open file near king (-25 / -10 per file); only near back rank
 
 ### `src/search.rs`
 - `SearchResult { best_move: Option<Move>, score: i32, depth: u32, nodes: u64, candidates: Vec<(Move, i32)> }`
@@ -182,7 +185,8 @@ UCI (Universal Chess Interface) protocol loop for GUI integration and Lichess bo
 - [x] Zobrist hashing (deterministic, xorshift64)
 - [x] Threefold repetition detection (in search and game loop)
 - [x] 50-move rule (in search and game loop)
-- [x] Static evaluation: material + piece-square tables (bitboard iteration)
+- [x] Static evaluation: material + piece-square tables + king safety (bitboard iteration)
+- [x] Transposition table (Zobrist hash → score/move/bound; always-replace, 1M entries ~24 MB)
 - [x] Search: negamax with alpha-beta pruning
 - [x] Iterative deepening (1 to max_depth) with optional time deadline
 - [x] Quiescence search with configurable depth cap (`--qdepth`, default 6)
@@ -204,10 +208,11 @@ None currently known.
 
 ### TODO
 
-- [ ] Transposition table (Zobrist hash → score/move; major search speedup)
 - [ ] Better move ordering: killer moves, history heuristic
-- [ ] Evaluation improvements: king safety, passed pawns, open files, rook on seventh
-- [ ] Endgame detection and adjusted king evaluation (active king in endgame)
+- [ ] Evaluation: passed pawns (plans/passed-pawns-eval.md)
+- [ ] Evaluation: pawn structure — doubled/isolated penalties (plans/pawn-structure-eval.md)
+- [ ] Evaluation: rook on open file / 7th rank (plans/rook-open-file-eval.md)
+- [ ] Evaluation: endgame phase detection + active king table (plans/endgame-phase-eval.md)
 - [ ] Remove mailbox `Board` from `Position` (make_move still uses it; `bbs` is rebuilt each move)
 - [ ] Lichess bot deployment via Lichess Bot API + `--uci` mode
 - [ ] LLM experiment: board state as token sequence, move prediction as next-token generation

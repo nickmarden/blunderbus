@@ -22,6 +22,11 @@ pub const RANK_6: u64 = 0x0000_FF00_0000_0000;
 pub const RANK_7: u64 = 0x00FF_0000_0000_0000;
 pub const RANK_8: u64 = 0xFF00_0000_0000_0000;
 
+/// Returns a bitboard with every square on the given file set (file 0=a … 7=h).
+pub fn file_mask(file: u8) -> Bitboard {
+    Bitboard(0x0101_0101_0101_0101u64 << file)
+}
+
 // --- Bitboard newtype ---
 
 /// A set of up to 64 squares encoded as a bitmask.

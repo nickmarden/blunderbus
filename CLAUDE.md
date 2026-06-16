@@ -5,9 +5,10 @@ A learning project. The goal is to understand chess engine theory deeply, not to
 ## Project Purpose
 
 Build a working chess engine in Rust, step by step, with full understanding of every decision.
-Long-term research question: can LLM-style "next token" prediction (where a token is a move, and
-the input sequence is board state) serve as a viable training model for a chess engine? Getting
-there requires a working, well-understood engine first.
+Long-term research question: can LLM-style "next token" prediction (where the output token is a
+move and the input is the current board state) serve as a viable training model for a chess engine?
+Building blunderbus is about understanding engine theory deeply before tackling that experiment;
+the experiment itself could use Stockfish or any other engine for data generation.
 
 ## Nick's Background
 

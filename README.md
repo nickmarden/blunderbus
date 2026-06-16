@@ -1,6 +1,6 @@
 # blunderbus
 
-A chess engine written in Rust, built as a learning project to understand engine theory from the ground up. The long-term goal is to explore whether an LLM-style "next token" prediction model — where each token is a move and the input is a sequence of board states — can serve as a viable chess engine training approach. Getting there requires a working, well-understood engine first.
+A chess engine written in Rust, built as a learning project to understand engine theory from the ground up. The long-term research question: can an LLM-style "next token" prediction model — where the output token is a move and the input is the current board state — serve as a viable chess engine training approach? Building blunderbus is about developing deep intuition for how engines work before tackling that experiment; the experiment itself could use Stockfish or any other engine for data generation.
 
 ## Build
 

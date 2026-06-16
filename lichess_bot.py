@@ -6,7 +6,7 @@ Connects to the Lichess Bot API, streams incoming events, accepts challenges,
 and manages one blunderbus UCI subprocess per active game.
 
 Usage:
-    python lichess_bot.py [--token TOKEN] [--depth N] [--max-games N]
+    python lichess_bot.py [--token TOKEN] [--depth N] [--candidates N] [--strength N] [--max-games N]
 
 Token is read from LICHESS_TOKEN env var or the .env file in this directory.
 """
@@ -122,11 +122,12 @@ class LichessAPI:
 # ---------------------------------------------------------------------------
 
 class UCI:
-    def __init__(self, depth: int, debug: bool = False):
+    def __init__(self, depth: int, candidates: int = 3, strength: int = 100, debug: bool = False):
         self.depth = depth
         self._debug = debug
         self._proc = subprocess.Popen(
-            [BLUNDERBUS_BIN, "--uci", "--depth", str(depth)],
+            [BLUNDERBUS_BIN, "--uci", "--depth", str(depth),
+             "--candidates", str(candidates), "--strength", str(strength)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -233,12 +234,13 @@ class UCI:
 # ---------------------------------------------------------------------------
 
 class GameHandler:
-    def __init__(self, api: LichessAPI, game_id: str, bot_color: str, depth: int, debug: bool = False):
+    def __init__(self, api: LichessAPI, game_id: str, bot_color: str, depth: int,
+                 candidates: int = 3, strength: int = 100, debug: bool = False):
         self.api = api
         self.game_id = game_id
         self.bot_color = bot_color  # "white" or "black"
         self.depth = depth
-        self.uci = UCI(depth, debug=debug)
+        self.uci = UCI(depth, candidates=candidates, strength=strength, debug=debug)
         self.moves: list[str] = []  # accumulated UCI moves from root
         self._done = False
 
@@ -343,6 +345,8 @@ def main():
     parser = argparse.ArgumentParser(description="Blunderbus Lichess bot")
     parser.add_argument("--token", help="Lichess OAuth token (overrides .env)")
     parser.add_argument("--depth", type=int, default=4, help="Search depth (default 4)")
+    parser.add_argument("--candidates", type=int, default=1, help="Top-N moves to consider for strength randomization (default 1)")
+    parser.add_argument("--strength", type=int, default=100, help="0-100: %% chance to pick best move vs random from top-N (default 100)")
     parser.add_argument("--max-games", type=int, default=4, help="Max concurrent games")
     parser.add_argument("--debug", action="store_true", help="Log every UCI line sent/received")
     args = parser.parse_args()
@@ -366,7 +370,9 @@ def main():
     active_games: dict[str, threading.Thread] = {}
 
     def start_game(game_id: str, color: str):
-        handler = GameHandler(api, game_id, color, args.depth, debug=args.debug)
+        handler = GameHandler(api, game_id, color, args.depth,
+                              candidates=args.candidates, strength=args.strength,
+                              debug=args.debug)
         t = threading.Thread(target=handler.run, name=f"game-{game_id}", daemon=True)
         t.start()
         active_games[game_id] = t

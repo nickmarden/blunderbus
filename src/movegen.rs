@@ -1,3 +1,4 @@
+use crate::bitboard::{king_attacks, knight_attacks};
 use crate::position::Position;
 use crate::types::{Color, Piece, PieceKind, Square};
 
@@ -66,42 +67,21 @@ pub fn generate_pseudo_legal_moves(pos: &Position) -> Vec<Move> {
 
 // --- Knight ---
 
-const KNIGHT_OFFSETS: [(i8, i8); 8] = [
-    (-2, -1), (-2, 1), (-1, -2), (-1, 2),
-    ( 1, -2), ( 1, 2), ( 2, -1), ( 2, 1),
-];
-
 fn gen_knight_moves(pos: &Position, from: Square, color: Color, moves: &mut Vec<Move>) {
-    let (file, rank) = (from.file() as i8, from.rank() as i8);
-    for (df, dr) in KNIGHT_OFFSETS {
-        let (f, r) = (file + df, rank + dr);
-        if in_bounds(f, r) {
-            let to = Square::from_file_rank(f as u8, r as u8);
-            if !occupied_by(pos, to, color) {
-                moves.push(Move::normal(from, to));
-            }
-        }
+    let mut targets = knight_attacks()[from.index() as usize]
+        & !pos.bbs.color_occupancy(color);
+    while !targets.is_empty() {
+        moves.push(Move::normal(from, targets.pop_lsb()));
     }
 }
 
 // --- King ---
 
-const KING_OFFSETS: [(i8, i8); 8] = [
-    (-1, -1), (-1, 0), (-1, 1),
-    ( 0, -1),           (0, 1),
-    ( 1, -1), ( 1, 0), ( 1, 1),
-];
-
 fn gen_king_moves(pos: &Position, from: Square, color: Color, moves: &mut Vec<Move>) {
-    let (file, rank) = (from.file() as i8, from.rank() as i8);
-    for (df, dr) in KING_OFFSETS {
-        let (f, r) = (file + df, rank + dr);
-        if in_bounds(f, r) {
-            let to = Square::from_file_rank(f as u8, r as u8);
-            if !occupied_by(pos, to, color) {
-                moves.push(Move::normal(from, to));
-            }
-        }
+    let mut targets = king_attacks()[from.index() as usize]
+        & !pos.bbs.color_occupancy(color);
+    while !targets.is_empty() {
+        moves.push(Move::normal(from, targets.pop_lsb()));
     }
 
     // Castling: squares must be empty, and the king must not start in check,
@@ -262,9 +242,6 @@ fn in_bounds(file: i8, rank: i8) -> bool {
     file >= 0 && file < 8 && rank >= 0 && rank < 8
 }
 
-fn occupied_by(pos: &Position, sq: Square, color: Color) -> bool {
-    matches!(pos.board.get(sq), Some(Piece { color: c, .. }) if c == color)
-}
 
 /// Count all legal positions reachable at exactly `depth` half-moves.
 /// The well-known starting-position values are the gold standard for move generator correctness.

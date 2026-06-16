@@ -368,7 +368,6 @@ fn lcg_next(state: &mut u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Color, PieceKind};
     use crate::movegen::MoveKind;
 
     fn dummy_move(from_idx: u8, to_idx: u8) -> Move {

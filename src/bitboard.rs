@@ -1,3 +1,9 @@
+// Items used only in later migration phases or in tests are flagged dead_code by cargo build.
+// Suppress those warnings for now — they will be used as Phases 2c/2d/3 land.
+#![allow(dead_code)]
+
+use std::sync::OnceLock;
+
 use crate::board::Board;
 use crate::types::{Color, Piece, PieceKind, Square};
 
@@ -63,6 +69,45 @@ impl std::ops::Not    for Bitboard { type Output = Self; fn not(self)           
 impl std::ops::BitOrAssign  for Bitboard { fn bitor_assign(&mut self,  r: Self) { self.0 |=  r.0; } }
 impl std::ops::BitAndAssign for Bitboard { fn bitand_assign(&mut self, r: Self) { self.0 &=  r.0; } }
 impl std::ops::BitXorAssign for Bitboard { fn bitxor_assign(&mut self, r: Self) { self.0 ^=  r.0; } }
+
+// --- Precomputed attack tables ---
+
+/// Knight attack mask for each square.
+pub fn knight_attacks() -> &'static [Bitboard; 64] {
+    static TABLE: OnceLock<[Bitboard; 64]> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut t = [Bitboard::EMPTY; 64];
+        for sq in 0u8..64 {
+            let b = Bitboard::from_square(Square::new(sq));
+            t[sq as usize] =
+                b.north().north().east()
+              | b.north().north().west()
+              | b.south().south().east()
+              | b.south().south().west()
+              | b.north().east().east()
+              | b.north().west().west()
+              | b.south().east().east()
+              | b.south().west().west();
+        }
+        t
+    })
+}
+
+/// King attack mask for each square (all 8 neighbours).
+pub fn king_attacks() -> &'static [Bitboard; 64] {
+    static TABLE: OnceLock<[Bitboard; 64]> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut t = [Bitboard::EMPTY; 64];
+        for sq in 0u8..64 {
+            let b = Bitboard::from_square(Square::new(sq));
+            t[sq as usize] =
+                b.north() | b.south() | b.east() | b.west()
+              | b.north_east() | b.north_west()
+              | b.south_east() | b.south_west();
+        }
+        t
+    })
+}
 
 // --- BitboardSet ---
 
@@ -188,6 +233,30 @@ mod tests {
         let bbs = starting_bbs();
         let e4 = Square::from_file_rank(4, 3);
         assert_eq!(bbs.piece_at(e4), None);
+    }
+
+    #[test]
+    fn knight_attacks_center_has_eight_targets() {
+        let e4 = Square::from_file_rank(4, 3);
+        assert_eq!(knight_attacks()[e4.index() as usize].popcount(), 8);
+    }
+
+    #[test]
+    fn knight_attacks_corner_has_two_targets() {
+        let a1 = Square::from_file_rank(0, 0);
+        assert_eq!(knight_attacks()[a1.index() as usize].popcount(), 2);
+    }
+
+    #[test]
+    fn king_attacks_center_has_eight_targets() {
+        let e4 = Square::from_file_rank(4, 3);
+        assert_eq!(king_attacks()[e4.index() as usize].popcount(), 8);
+    }
+
+    #[test]
+    fn king_attacks_corner_has_three_targets() {
+        let a1 = Square::from_file_rank(0, 0);
+        assert_eq!(king_attacks()[a1.index() as usize].popcount(), 3);
     }
 
     #[test]

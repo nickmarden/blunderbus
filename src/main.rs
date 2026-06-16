@@ -1,5 +1,6 @@
 mod types;
 mod board;
+mod bitboard;
 mod position;
 mod movegen;
 mod eval;

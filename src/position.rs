@@ -1,5 +1,6 @@
 use std::fmt;
 
+use crate::bitboard::BitboardSet;
 use crate::board::Board;
 use crate::movegen::{Move, MoveKind};
 use crate::types::{Color, Piece, PieceKind, Square};
@@ -50,6 +51,7 @@ impl fmt::Display for CastlingRights {
 #[derive(Clone)]
 pub struct Position {
     pub board: Board,
+    pub bbs: BitboardSet,
     pub side_to_move: Color,
     pub castling: CastlingRights,
     pub en_passant: Option<Square>,
@@ -100,8 +102,10 @@ impl Position {
             .parse::<u32>()
             .map_err(|e| format!("invalid fullmove number: {e}"))?;
 
+        let bbs = BitboardSet::from_board(&board);
         let mut pos = Position {
             board,
+            bbs,
             side_to_move,
             castling,
             en_passant,
@@ -177,6 +181,7 @@ impl Position {
         }
 
         pos.side_to_move = self.side_to_move.opposite();
+        pos.bbs = BitboardSet::from_board(&pos.board);
         pos.hash = pos.compute_hash();
         pos
     }

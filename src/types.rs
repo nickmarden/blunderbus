@@ -1,7 +1,8 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
 pub enum Color {
-    White,
-    Black,
+    White = 0,
+    Black = 1,
 }
 
 impl Color {
@@ -35,13 +36,14 @@ impl Color {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
 pub enum PieceKind {
-    Pawn,
-    Knight,
-    Bishop,
-    Rook,
-    Queen,
-    King,
+    Pawn   = 0,
+    Knight = 1,
+    Bishop = 2,
+    Rook   = 3,
+    Queen  = 4,
+    King   = 5,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

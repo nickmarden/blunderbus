@@ -116,9 +116,10 @@ Static evaluation from White's perspective (positive = White ahead, negative = B
   - `game_history`: hashes of positions before the current one; used for repetition detection
 - `fn negamax_root(pos, depth, nodes, history, qdepth) -> (i32, Option<Move>, Vec<(Move,i32)>)`
   - Collects all root-move scores (alpha-beta at root has no cutoffs from -INF window)
-- `fn negamax(pos, depth, alpha, beta, ply, nodes, history, qdepth) -> i32`
+- `fn negamax(pos, depth, alpha, beta, ply, nodes, history, qdepth, tt, killers, last_was_null) -> i32`
   - Repetition: score 0 if pos.hash appears >= 2 times in history
-  - At depth==0: calls `quiescence`; otherwise: move order, alpha-beta, beta cutoff, 50-move rule
+  - At depth==0: calls `quiescence`; otherwise: null move pruning, move order, alpha-beta, beta cutoff, 50-move rule
+- `fn make_null_move(pos) -> Position` — flip side_to_move, clear en_passant, recompute hash; used by null move pruning
 - `fn quiescence(pos, alpha, beta, nodes, qdepth) -> i32`
   - Stand-pat score as lower bound; explores captures/en passant/promotions only
   - Returns alpha (stand-pat) immediately when qdepth == 0
@@ -220,7 +221,7 @@ None currently known.
 Search improvements (in order):
 - [x] MVV-LVA capture ordering (plans/mvv-lva.md)
 - [x] Killer move heuristic (plans/killer-moves.md)
-- [ ] Null move pruning (plans/null-move-pruning.md)
+- [x] Null move pruning (plans/null-move-pruning.md)
 - [ ] Late move reductions / LMR (plans/late-move-reductions.md)
 
 Evaluation improvements (in order):

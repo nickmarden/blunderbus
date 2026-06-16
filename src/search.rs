@@ -4,7 +4,7 @@ use crate::eval::{evaluate, material_value};
 use crate::movegen::{generate_legal_moves, Move, MoveKind};
 use crate::position::Position;
 use crate::tt::{Bound, TranspositionTable};
-use crate::types::Color;
+use crate::types::{Color, PieceKind};
 
 const INFINITY: i32 = 1_000_000;
 const MATE_SCORE: i32 = 100_000;
@@ -97,7 +97,7 @@ fn negamax_root(
     for mv in &moves {
         let after = pos.make_move(mv);
         history.push(after.hash);
-        let score = -negamax(&after, depth - 1, -INFINITY, -alpha, 1, nodes, history, qdepth, tt, killers);
+        let score = -negamax(&after, depth - 1, -INFINITY, -alpha, 1, nodes, history, qdepth, tt, killers, false);
         history.pop();
         scored.push((*mv, score));
         if score > alpha {
@@ -126,6 +126,7 @@ fn negamax(
     qdepth: u32,
     tt: &mut TranspositionTable,
     killers: &mut KillerTable,
+    last_was_null: bool,
 ) -> i32 {
     *nodes += 1;
 
@@ -166,6 +167,28 @@ fn negamax(
         };
     }
 
+    // --- Null move pruning ---
+    // If giving the opponent a free tempo still fails to save them, prune.
+    // Guards: not in check (can't pass), not after another null move, depth >= 3,
+    // and we have at least one non-pawn piece (avoids zugzwang in king+pawn endings).
+    let in_check = pos.is_in_check(pos.side_to_move);
+    let stm = pos.side_to_move;
+    let has_pieces = !(pos.bbs.pieces(stm, PieceKind::Knight)
+        | pos.bbs.pieces(stm, PieceKind::Bishop)
+        | pos.bbs.pieces(stm, PieceKind::Rook)
+        | pos.bbs.pieces(stm, PieceKind::Queen)).is_empty();
+
+    if !last_was_null && !in_check && depth >= 3 && has_pieces {
+        let null_pos = make_null_move(pos);
+        history.push(null_pos.hash);
+        let null_score = -negamax(&null_pos, depth - 1 - 2, -beta, -beta + 1,
+                                   ply + 1, nodes, history, qdepth, tt, killers, true);
+        history.pop();
+        if null_score >= beta {
+            return beta;
+        }
+    }
+
     let ply_idx = (ply as usize).min(MAX_PLY - 1);
     order_moves(pos, &mut moves, tt_move, &killers[ply_idx]);
 
@@ -174,7 +197,7 @@ fn negamax(
     for mv in &moves {
         let after = pos.make_move(mv);
         history.push(after.hash);
-        let score = -negamax(&after, depth - 1, -beta, -alpha, ply + 1, nodes, history, qdepth, tt, killers);
+        let score = -negamax(&after, depth - 1, -beta, -alpha, ply + 1, nodes, history, qdepth, tt, killers, false);
         history.pop();
 
         if score >= beta {
@@ -228,6 +251,17 @@ fn quiescence(pos: &Position, mut alpha: i32, beta: i32, nodes: &mut u64, qdepth
     }
 
     alpha
+}
+
+/// Make a null move: flip side to move and clear en passant without moving a piece.
+/// Used by null move pruning. Not valid in check or zugzwang-prone positions.
+fn make_null_move(pos: &Position) -> Position {
+    let mut p = pos.clone();
+    p.side_to_move = pos.side_to_move.opposite();
+    p.en_passant = None;
+    p.halfmove_clock += 1;
+    p.hash = p.compute_hash();
+    p
 }
 
 fn eval_from_stm(pos: &Position) -> i32 {
@@ -442,6 +476,29 @@ mod tests {
         if let Some(quiet_idx) = first_non_killer_quiet {
             assert!(killer_idx < quiet_idx, "killer should come before other quiet moves");
         }
+    }
+
+    // --- Null move pruning tests ---
+
+    #[test]
+    fn null_move_does_not_corrupt_winning_eval() {
+        // Queen + king vs king — clearly winning. Null move may prune but must not
+        // corrupt the score. Kings are far apart so no king can be immediately captured.
+        let pos = Position::from_fen("6k1/8/8/8/8/8/8/Q3K3 w - - 0 1").unwrap();
+        let result = search(&pos, 4, &[], 0, 1, None, &mut tt());
+        assert!(result.best_move.is_some());
+        // Score should reflect the queen advantage (≥ ~800 cp); null move must not collapse it to 0.
+        assert!(result.score > 500, "queen-up position should score > 500 cp, got {}", result.score);
+    }
+
+    #[test]
+    fn null_move_skipped_in_kings_only_endgame() {
+        // Only kings — has_pieces=false, so null move must not fire.
+        // Evaluates near 0 regardless.
+        let pos = Position::from_fen("4k3/8/8/8/8/8/8/4K3 w - - 0 1").unwrap();
+        let result = search(&pos, 4, &[], 0, 1, None, &mut tt());
+        assert!(result.best_move.is_some());
+        assert!(result.score.abs() < 100, "kings-only should score near 0, got {}", result.score);
     }
 
     #[test]

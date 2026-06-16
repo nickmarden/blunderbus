@@ -20,6 +20,7 @@ pub fn evaluate(pos: &Position) -> i32 {
         score += sign * king_safety_penalty(pos, color);
         score += sign * passed_pawn_bonus(pos, color);
         score += sign * pawn_structure_penalty(pos, color);
+        score += sign * rook_bonus(pos, color);
     }
 
     score
@@ -98,6 +99,37 @@ fn pawn_structure_penalty(pos: &Position, color: Color) -> i32 {
 
 const DOUBLED_PAWN_PENALTY:  i32 = -20;
 const ISOLATED_PAWN_PENALTY: i32 = -15;
+
+/// Bonus for rooks on open/semi-open files and on the 7th rank.
+///
+/// Fully open file (no pawns either color): +20 cp.
+/// Semi-open file (no friendly pawns, enemy pawns present): +10 cp.
+/// 7th rank (rank 7 for White, rank 2 for Black): +25 cp, stacks with file bonus.
+fn rook_bonus(pos: &Position, color: Color) -> i32 {
+    let friendly_pawns = pos.bbs.pieces(color, PieceKind::Pawn);
+    let all_pawns = friendly_pawns | pos.bbs.pieces(color.opposite(), PieceKind::Pawn);
+    let seventh_rank: u8 = match color { Color::White => 6, Color::Black => 1 };
+
+    let mut bonus = 0i32;
+    let mut rooks = pos.bbs.pieces(color, PieceKind::Rook);
+    while !rooks.is_empty() {
+        let sq = rooks.pop_lsb();
+        let file = sq.file();
+        if (all_pawns & file_mask(file)).is_empty() {
+            bonus += ROOK_OPEN_FILE_BONUS;
+        } else if (friendly_pawns & file_mask(file)).is_empty() {
+            bonus += ROOK_SEMI_OPEN_FILE_BONUS;
+        }
+        if sq.rank() == seventh_rank {
+            bonus += ROOK_SEVENTH_RANK_BONUS;
+        }
+    }
+    bonus
+}
+
+const ROOK_OPEN_FILE_BONUS:    i32 = 20;
+const ROOK_SEMI_OPEN_FILE_BONUS: i32 = 10;
+const ROOK_SEVENTH_RANK_BONUS:  i32 = 25;
 
 /// King safety penalty for `color` (always <= 0).
 ///
@@ -485,5 +517,63 @@ mod tests {
         let w_pen = pawn_structure_penalty(&pos, Color::White);
         let b_pen = pawn_structure_penalty(&pos, Color::Black);
         assert!(b_pen < w_pen, "Black with doubled pawn should have worse structure penalty");
+    }
+
+    // --- rook bonus tests ---
+
+    #[test]
+    fn rook_bonus_closed_file_no_bonus() {
+        // White rook on e1, White pawn on e2 — closed file, no bonus.
+        // King on g1 to keep rook on e-file (4R1K1 = a1-d1 empty, e1=R, f1 empty, g1=K, h1 empty).
+        let pos = Position::from_fen("4k3/8/8/8/8/8/4P3/4R1K1 w - - 0 1").unwrap();
+        assert_eq!(rook_bonus(&pos, Color::White), 0, "rook behind own pawn gets no bonus");
+    }
+
+    #[test]
+    fn rook_bonus_semi_open_file() {
+        // White rook on e1, Black pawn on e5, no White pawn on e-file — semi-open.
+        let pos = Position::from_fen("4k3/8/8/4p3/8/8/8/4R1K1 w - - 0 1").unwrap();
+        assert_eq!(rook_bonus(&pos, Color::White), ROOK_SEMI_OPEN_FILE_BONUS,
+            "rook on semi-open file (enemy pawn only) should get semi-open bonus");
+    }
+
+    #[test]
+    fn rook_bonus_fully_open_file() {
+        // White rook on e1, no pawns on e-file at all — fully open.
+        let pos = Position::from_fen("4k3/8/8/8/8/8/8/4KR2 w - - 0 1").unwrap();
+        assert_eq!(rook_bonus(&pos, Color::White), ROOK_OPEN_FILE_BONUS,
+            "rook on fully open file should get open file bonus");
+    }
+
+    #[test]
+    fn rook_bonus_seventh_rank_white() {
+        // White rook on e7 — on the 7th rank; e-file has pawns so no file bonus.
+        let pos = Position::from_fen("4k3/4R3/8/8/8/8/4P3/4K3 w - - 0 1").unwrap();
+        assert_eq!(rook_bonus(&pos, Color::White), ROOK_SEVENTH_RANK_BONUS,
+            "White rook on rank 7 should get seventh-rank bonus");
+    }
+
+    #[test]
+    fn rook_bonus_open_file_and_seventh_rank_stack() {
+        // White rook on e7, no pawns on e-file — gets both bonuses.
+        let pos = Position::from_fen("4k3/4R3/8/8/8/8/8/4K3 w - - 0 1").unwrap();
+        assert_eq!(rook_bonus(&pos, Color::White), ROOK_OPEN_FILE_BONUS + ROOK_SEVENTH_RANK_BONUS,
+            "open file and seventh rank bonuses should stack");
+    }
+
+    #[test]
+    fn rook_bonus_black_second_rank() {
+        // Black rook on e2 (rank index 1 = rank 2) — 7th rank equivalent for Black.
+        let pos = Position::from_fen("4k3/8/8/8/8/8/4r3/4K3 w - - 0 1").unwrap();
+        assert_eq!(rook_bonus(&pos, Color::Black), ROOK_OPEN_FILE_BONUS + ROOK_SEVENTH_RANK_BONUS,
+            "Black rook on rank 2 open file should get both bonuses");
+    }
+
+    #[test]
+    fn rook_bonus_starting_position_zero() {
+        let pos = Position::starting_position();
+        assert_eq!(rook_bonus(&pos, Color::White), 0);
+        assert_eq!(rook_bonus(&pos, Color::Black), 0);
+        assert_eq!(evaluate(&pos), 0, "starting position should still be equal");
     }
 }

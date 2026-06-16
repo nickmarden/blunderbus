@@ -6,6 +6,7 @@ use crate::types::{Color, PieceKind, Square};
 /// Positive = White is better, negative = Black is better.
 pub fn evaluate(pos: &Position) -> i32 {
     let mut score = 0i32;
+    let phase = game_phase(pos);
 
     for color in [Color::White, Color::Black] {
         let sign = if color == Color::White { 1 } else { -1 };
@@ -14,7 +15,7 @@ pub fn evaluate(pos: &Position) -> i32 {
             let mut bb = pos.bbs.pieces(color, kind);
             while !bb.is_empty() {
                 let sq = bb.pop_lsb();
-                score += sign * (material_value(kind) + piece_square_bonus(kind, color, sq));
+                score += sign * (material_value(kind) + piece_square_bonus(kind, color, sq, phase));
             }
         }
         score += sign * king_safety_penalty(pos, color);
@@ -201,18 +202,24 @@ pub fn material_value(kind: PieceKind) -> i32 {
     }
 }
 
-fn piece_square_bonus(kind: PieceKind, color: Color, sq: Square) -> i32 {
+fn piece_square_bonus(kind: PieceKind, color: Color, sq: Square, phase: i32) -> i32 {
+    let idx = match color {
+        Color::White => (7 - sq.rank() as usize) * 8 + sq.file() as usize,
+        Color::Black =>      sq.rank() as usize  * 8 + sq.file() as usize,
+    };
+    if kind == PieceKind::King {
+        // Blend MG and EG king tables based on game phase (0=opening, 256=endgame).
+        let mg = KING_MG_TABLE[idx];
+        let eg = KING_EG_TABLE[idx];
+        return (mg * (256 - phase) + eg * phase) / 256;
+    }
     let table: &[i32; 64] = match kind {
         PieceKind::Pawn   => &PAWN_TABLE,
         PieceKind::Knight => &KNIGHT_TABLE,
         PieceKind::Bishop => &BISHOP_TABLE,
         PieceKind::Rook   => &ROOK_TABLE,
         PieceKind::Queen  => &QUEEN_TABLE,
-        PieceKind::King   => &KING_TABLE,
-    };
-    let idx = match color {
-        Color::White => (7 - sq.rank() as usize) * 8 + sq.file() as usize,
-        Color::Black =>      sq.rank() as usize  * 8 + sq.file() as usize,
+        PieceKind::King   => unreachable!(),
     };
     table[idx]
 }
@@ -281,7 +288,7 @@ const QUEEN_TABLE: [i32; 64] = [
 ];
 
 #[rustfmt::skip]
-const KING_TABLE: [i32; 64] = [
+const KING_MG_TABLE: [i32; 64] = [
     -30,-40,-40,-50,-50,-40,-40,-30,
     -30,-40,-40,-50,-50,-40,-40,-30,
     -30,-40,-40,-50,-50,-40,-40,-30,
@@ -291,6 +298,38 @@ const KING_TABLE: [i32; 64] = [
      20, 20,  0,  0,  0,  0, 20, 20,
      20, 30, 10,  0,  0, 10, 30, 20,
 ];
+
+#[rustfmt::skip]
+const KING_EG_TABLE: [i32; 64] = [
+    -50,-40,-30,-20,-20,-30,-40,-50,
+    -30,-20,-10,  0,  0,-10,-20,-30,
+    -30,-10, 20, 30, 30, 20,-10,-30,
+    -30,-10, 30, 40, 40, 30,-10,-30,
+    -30,-10, 30, 40, 40, 30,-10,-30,
+    -30,-10, 20, 30, 30, 20,-10,-30,
+    -30,-30,  0,  0,  0,  0,-30,-30,
+    -50,-30,-30,-30,-30,-30,-30,-50,
+];
+
+// Phase weights per piece kind: [Pawn, Knight, Bishop, Rook, Queen, King]
+const PHASE_WEIGHTS: [i32; 6] = [0, 1, 1, 2, 4, 0];
+// Total phase when all pieces are present (4 knights + 4 bishops + 4 rooks + 2 queens)
+const TOTAL_PHASE: i32 = 4 * 1 + 4 * 1 + 4 * 2 + 2 * 4; // = 24
+
+/// Returns 0 (opening/middlegame) to 256 (full endgame).
+/// Decreases as major pieces are captured.
+pub fn game_phase(pos: &Position) -> i32 {
+    let mut phase = 0i32;
+    for color in [Color::White, Color::Black] {
+        for kind in [PieceKind::Pawn, PieceKind::Knight, PieceKind::Bishop,
+                     PieceKind::Rook, PieceKind::Queen, PieceKind::King] {
+            let count = pos.bbs.pieces(color, kind).popcount() as i32;
+            phase += count * PHASE_WEIGHTS[kind as usize];
+        }
+    }
+    let phase = phase.min(TOTAL_PHASE); // clamp (shouldn't exceed, but guard promotions)
+    (TOTAL_PHASE - phase) * 256 / TOTAL_PHASE
+}
 
 #[cfg(test)]
 mod tests {
@@ -575,5 +614,60 @@ mod tests {
         assert_eq!(rook_bonus(&pos, Color::White), 0);
         assert_eq!(rook_bonus(&pos, Color::Black), 0);
         assert_eq!(evaluate(&pos), 0, "starting position should still be equal");
+    }
+
+    // --- Endgame phase tests ---
+
+    #[test]
+    fn game_phase_starting_position_is_zero() {
+        // Full piece complement → pure middlegame.
+        let pos = Position::starting_position();
+        assert_eq!(game_phase(&pos), 0, "starting position should have phase 0 (middlegame)");
+    }
+
+    #[test]
+    fn game_phase_kings_only_is_256() {
+        // Only kings remain → pure endgame.
+        let pos = Position::from_fen("4k3/8/8/8/8/8/8/4K3 w - - 0 1").unwrap();
+        assert_eq!(game_phase(&pos), 256, "kings-only should have phase 256 (endgame)");
+    }
+
+    #[test]
+    fn game_phase_partial_decreases() {
+        // A few pieces left → somewhere between 0 and 256.
+        let pos = Position::from_fen("4k3/8/8/8/8/8/8/R3K2R w KQ - 0 1").unwrap();
+        let phase = game_phase(&pos);
+        assert!(phase > 0 && phase < 256, "two rooks and kings should yield intermediate phase, got {phase}");
+    }
+
+    #[test]
+    fn king_prefers_corner_in_middlegame() {
+        // In MG (phase=0), KING_MG_TABLE rewards back-rank corner (castled position).
+        let mg_corner  = piece_square_bonus(PieceKind::King, Color::White, Square::from_file_rank(6, 0), 0);
+        let mg_center  = piece_square_bonus(PieceKind::King, Color::White, Square::from_file_rank(4, 4), 0);
+        assert!(mg_corner > mg_center,
+            "MG king should prefer castled corner over center, corner={mg_corner} center={mg_center}");
+    }
+
+    #[test]
+    fn king_prefers_center_in_endgame() {
+        // In EG (phase=256), KING_EG_TABLE rewards central squares.
+        let eg_center = piece_square_bonus(PieceKind::King, Color::White, Square::from_file_rank(3, 3), 256);
+        let eg_corner = piece_square_bonus(PieceKind::King, Color::White, Square::from_file_rank(0, 0), 256);
+        assert!(eg_center > eg_corner,
+            "EG king should prefer center over corner, center={eg_center} corner={eg_corner}");
+    }
+
+    #[test]
+    fn king_phase_blend_is_between_mg_and_eg() {
+        // At phase=128 (half endgame), bonus should be between pure MG and EG values.
+        let sq = Square::from_file_rank(3, 3); // d4 — good EG square, bad MG square
+        let mg = piece_square_bonus(PieceKind::King, Color::White, sq, 0);
+        let eg = piece_square_bonus(PieceKind::King, Color::White, sq, 256);
+        let blend = piece_square_bonus(PieceKind::King, Color::White, sq, 128);
+        let lo = mg.min(eg);
+        let hi = mg.max(eg);
+        assert!(blend >= lo && blend <= hi,
+            "blended bonus {blend} should be between MG {mg} and EG {eg}");
     }
 }

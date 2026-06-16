@@ -90,12 +90,13 @@ Full game state. The central struct passed everywhere.
 
 ### `src/eval.rs`
 Static evaluation from White's perspective (positive = White ahead, negative = Black ahead).
-- `pub fn evaluate(pos) -> i32` — material + piece-square table bonuses + king safety
+- `pub fn evaluate(pos) -> i32` — material + piece-square table bonuses + king safety + endgame phase blending
 - `material_value(kind) -> i32`: Pawn=100, Knight=320, Bishop=330, Rook=500, Queen=900, King=20000
-- `piece_square_bonus(kind, color, sq) -> i32` — indexes into per-piece tables from the piece's
-  own perspective (White tables flip the rank index for Black)
-- Six `[i32; 64]` tables: `PAWN_TABLE`, `KNIGHT_TABLE`, `BISHOP_TABLE`, `ROOK_TABLE`,
-  `QUEEN_TABLE`, `KING_TABLE` — written rank 8 (top) to rank 1 (bottom)
+- `piece_square_bonus(kind, color, sq, phase) -> i32` — indexes into per-piece tables; King blends KING_MG_TABLE and KING_EG_TABLE by phase
+- `pub fn game_phase(pos) -> i32` — 0 (opening) to 256 (endgame); counts phase weight of remaining pieces
+- `PHASE_WEIGHTS: [i32; 6]` — per-piece phase weights `[0,1,1,2,4,0]`; `TOTAL_PHASE = 24`
+- Seven `[i32; 64]` tables: `PAWN_TABLE`, `KNIGHT_TABLE`, `BISHOP_TABLE`, `ROOK_TABLE`,
+  `QUEEN_TABLE`, `KING_MG_TABLE`, `KING_EG_TABLE` — written rank 8 (top) to rank 1 (bottom)
 - `king_safety_penalty(pos, color) -> i32` — pawn shield (-20 missing / -10 advanced per file)
   + open/semi-open file near king (-25 / -10 per file); only near back rank
 - `passed_pawn_bonus(pos, color) -> i32` — bitboard front-fill detection; rank-scaled bonus table `[0,0,10,20,35,55,80,0]`
@@ -223,7 +224,7 @@ Search improvements (in order):
 - [ ] Late move reductions / LMR (plans/late-move-reductions.md)
 
 Evaluation improvements (in order):
-- [ ] Endgame phase detection + tapered piece-square tables (plans/endgame-phase-eval.md)
+- [x] Endgame phase detection + tapered king piece-square tables (plans/endgame-phase-eval.md)
 - [ ] Mobility bonus for knights, bishops, rooks, queens (plans/mobility-eval.md)
 
 Long-term:

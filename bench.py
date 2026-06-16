@@ -129,13 +129,18 @@ def acpl_to_elo(acpl):
     """
     Rough ELO estimate from average centipawn loss.
 
-    Empirical fit anchored to roughly:
-      ACPL 10 -> 2200, ACPL 20 -> 1750, ACPL 40 -> 1300, ACPL 80 -> 900
-    Treat as a coarse indicator, not a precise rating.
+    Piecewise linear fit — stays meaningful at high ACPL where sqrt breaks down:
+      ACPL  10 -> ~2200   ACPL  50 -> ~1500
+      ACPL 100 -> ~1000   ACPL 200 -> ~500
+      ACPL 300 -> ~100    ACPL 400+ -> 0
+
+    The sqrt formula floors at zero for ACPL > 76, so this is a better fit
+    for engines that occasionally spiral into losing positions.
+    Treat as a coarse relative indicator, not an absolute rating.
     """
     if acpl <= 0:
-        return 3000
-    return max(0, int(3500 - 400 * math.sqrt(acpl)))
+        return 2500
+    return max(0, int(2500 - 6 * acpl))
 
 
 def print_side_stats(label, game_acpls, all_losses):

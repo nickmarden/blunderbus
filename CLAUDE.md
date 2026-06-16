@@ -181,6 +181,19 @@ UCI (Universal Chess Interface) protocol loop for GUI integration and Lichess bo
   - `depth N`: fixed depth; `movetime N`: Instant deadline after N ms
   - `wtime/btime/winc/binc`: time control; budget = `remaining/30 + inc/2` (min 50 ms)
 
+### `lichess_bot.py`
+Python bot driver that connects blunderbus to the Lichess Bot API.
+- Reads `LICHESS_TOKEN` from `.env` or environment; binary path: `target/release/blunderbus`
+- Streams `/api/stream/event` for challenges and game-start events
+- Accepts standard chess challenges (declines variants), up to `--max-games` concurrent games
+- Per game: streams `/api/bot/game/stream/{gameId}`, drives a blunderbus UCI subprocess
+- Time control: passes `wtime/btime/winc/binc` through to `go`; falls back to `go depth N`
+- `LichessAPI` — thin `requests.Session` wrapper with NDJSON streaming
+- `UCI` — subprocess wrapper with thread-safe `best_move()` call
+- `GameHandler` — per-game state machine; one thread per active game
+- Run: `.venv/bin/python lichess_bot.py [--depth N] [--max-games N]`
+- Dependencies: `requirements.txt` (`requests`); venv in `.venv/`
+
 ---
 
 ## Feature Status
@@ -232,7 +245,7 @@ Evaluation improvements (in order):
 
 Long-term:
 - [x] Remove mailbox `Board` from `Position` (make_move now updates bbs incrementally)
-- [ ] Lichess bot deployment via Lichess Bot API + `--uci` mode
+- [x] Lichess bot deployment via Lichess Bot API + `--uci` mode (`lichess_bot.py`)
 - [ ] LLM experiment: board state as token sequence, move prediction as next-token generation
 
 ---
@@ -320,9 +333,14 @@ These rules prevent context bloat and keep sessions productive.
 
 ```bash
 cargo build                          # compile
+cargo build --release                # release binary (needed for lichess_bot.py)
 cargo test 2>&1 | tail -10           # quick test summary
 cargo test 2>&1                      # full test output
 cargo run -- --pretty --depth 4 --eval --hint   # play a game
 cargo run -- --pretty --auto --depth 4          # engine vs engine
 cargo run -- --pgn --depth 4                    # game + PGN at end
+
+# Lichess bot
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt  # first-time setup
+.venv/bin/python lichess_bot.py --depth 4       # connect to Lichess
 ```

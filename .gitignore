@@ -1,2 +1,5 @@
 /target
 asterix_story_log.json
+.env
+.venv/
+__pycache__/

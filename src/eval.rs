@@ -1,4 +1,4 @@
-use crate::bitboard::{file_mask, front_fill};
+use crate::bitboard::{file_mask, front_fill, knight_attacks, Bitboard, BISHOP_RAYS, ROOK_RAYS};
 use crate::position::Position;
 use crate::types::{Color, PieceKind, Square};
 
@@ -22,6 +22,7 @@ pub fn evaluate(pos: &Position) -> i32 {
         score += sign * passed_pawn_bonus(pos, color);
         score += sign * pawn_structure_penalty(pos, color);
         score += sign * rook_bonus(pos, color);
+        score += sign * mobility_bonus(pos, color);
     }
 
     score
@@ -131,6 +132,66 @@ fn rook_bonus(pos: &Position, color: Color) -> i32 {
 const ROOK_OPEN_FILE_BONUS:    i32 = 20;
 const ROOK_SEMI_OPEN_FILE_BONUS: i32 = 10;
 const ROOK_SEVENTH_RANK_BONUS:  i32 = 25;
+
+const KNIGHT_MOBILITY_BONUS: i32 = 4;
+const BISHOP_MOBILITY_BONUS: i32 = 3;
+const ROOK_MOBILITY_BONUS:   i32 = 2;
+const QUEEN_MOBILITY_BONUS:  i32 = 1;
+
+/// Walk one ray direction from `from`, counting squares reachable through empty space.
+/// Stops after hitting any occupant (that square counts; one past a blocker does not).
+fn slider_ray_attacks(from: Square, occ: Bitboard, shifts: &[fn(Bitboard) -> Bitboard]) -> Bitboard {
+    let mut attacks = Bitboard::EMPTY;
+    for &shift in shifts {
+        let mut ray = Bitboard::from_square(from);
+        loop {
+            ray = shift(ray);
+            if ray.is_empty() { break; }
+            attacks = attacks | ray;
+            if !(ray & occ).is_empty() { break; }
+        }
+    }
+    attacks
+}
+
+/// Mobility bonus for `color` in centipawns.
+/// Counts squares each piece can reach (attacks & not own pieces).
+fn mobility_bonus(pos: &Position, color: Color) -> i32 {
+    let occ      = pos.bbs.occupancy();
+    let friendly = pos.bbs.color_occupancy(color);
+    let mut bonus = 0i32;
+
+    let mut knights = pos.bbs.pieces(color, PieceKind::Knight);
+    while !knights.is_empty() {
+        let sq = knights.pop_lsb();
+        let attacks = knight_attacks()[sq.index() as usize] & !friendly;
+        bonus += attacks.popcount() as i32 * KNIGHT_MOBILITY_BONUS;
+    }
+
+    let mut bishops = pos.bbs.pieces(color, PieceKind::Bishop);
+    while !bishops.is_empty() {
+        let sq = bishops.pop_lsb();
+        let attacks = slider_ray_attacks(sq, occ, &BISHOP_RAYS) & !friendly;
+        bonus += attacks.popcount() as i32 * BISHOP_MOBILITY_BONUS;
+    }
+
+    let mut rooks = pos.bbs.pieces(color, PieceKind::Rook);
+    while !rooks.is_empty() {
+        let sq = rooks.pop_lsb();
+        let attacks = slider_ray_attacks(sq, occ, &ROOK_RAYS) & !friendly;
+        bonus += attacks.popcount() as i32 * ROOK_MOBILITY_BONUS;
+    }
+
+    let mut queens = pos.bbs.pieces(color, PieceKind::Queen);
+    while !queens.is_empty() {
+        let sq = queens.pop_lsb();
+        let rook_part   = slider_ray_attacks(sq, occ, &ROOK_RAYS)   & !friendly;
+        let bishop_part = slider_ray_attacks(sq, occ, &BISHOP_RAYS) & !friendly;
+        bonus += (rook_part | bishop_part).popcount() as i32 * QUEEN_MOBILITY_BONUS;
+    }
+
+    bonus
+}
 
 /// King safety penalty for `color` (always <= 0).
 ///
@@ -669,5 +730,40 @@ mod tests {
         let hi = mg.max(eg);
         assert!(blend >= lo && blend <= hi,
             "blended bonus {blend} should be between MG {mg} and EG {eg}");
+    }
+
+    // --- Mobility tests ---
+
+    #[test]
+    fn mobility_starting_position_is_symmetric() {
+        // Both sides have identical mobility in the starting position.
+        let pos = Position::starting_position();
+        let w = mobility_bonus(&pos, Color::White);
+        let b = mobility_bonus(&pos, Color::Black);
+        assert_eq!(w, b, "mobility should be equal for both sides at start: white={w} black={b}");
+        assert_eq!(evaluate(&pos), 0, "evaluate must still return 0 from starting position");
+    }
+
+    #[test]
+    fn mobility_knight_rim_vs_center() {
+        // Knight on a1 has 2 moves; knight in the centre (e.g. d4) has up to 8.
+        // White knight on a1, kings far away.
+        let pos_rim = Position::from_fen("4k3/8/8/8/8/8/8/N3K3 w - - 0 1").unwrap();
+        let pos_ctr = Position::from_fen("4k3/8/8/8/3N4/8/8/4K3 w - - 0 1").unwrap();
+        let rim = mobility_bonus(&pos_rim, Color::White);
+        let ctr = mobility_bonus(&pos_ctr, Color::White);
+        assert!(ctr > rim, "central knight mobility {ctr} should exceed rim knight mobility {rim}");
+    }
+
+    #[test]
+    fn mobility_locked_bishop_vs_open_bishop() {
+        // Bishop blocked by its own pawns vs a bishop on an open diagonal.
+        // Locked: White bishop c1, pawns on b2 and d2 (fully blocked).
+        let pos_locked = Position::from_fen("4k3/8/8/8/8/8/1P1P4/2B1K3 w - - 0 1").unwrap();
+        // Open: White bishop c1 with open diagonals.
+        let pos_open   = Position::from_fen("4k3/8/8/8/8/8/8/2B1K3 w - - 0 1").unwrap();
+        let locked = mobility_bonus(&pos_locked, Color::White);
+        let open   = mobility_bonus(&pos_open,   Color::White);
+        assert!(open > locked, "open bishop mobility {open} should exceed locked bishop mobility {locked}");
     }
 }

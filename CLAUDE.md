@@ -90,7 +90,7 @@ Full game state. The central struct passed everywhere.
 
 ### `src/eval.rs`
 Static evaluation from White's perspective (positive = White ahead, negative = Black ahead).
-- `pub fn evaluate(pos) -> i32` — material + piece-square table bonuses + king safety + endgame phase blending
+- `pub fn evaluate(pos) -> i32` — material + piece-square table bonuses + king safety + endgame phase blending + mobility
 - `material_value(kind) -> i32`: Pawn=100, Knight=320, Bishop=330, Rook=500, Queen=900, King=20000
 - `piece_square_bonus(kind, color, sq, phase) -> i32` — indexes into per-piece tables; King blends KING_MG_TABLE and KING_EG_TABLE by phase
 - `pub fn game_phase(pos) -> i32` — 0 (opening) to 256 (endgame); counts phase weight of remaining pieces
@@ -104,6 +104,8 @@ Static evaluation from White's perspective (positive = White ahead, negative = B
 - `pawn_structure_penalty(pos, color) -> i32` — doubled pawns (-20 per extra) + isolated pawns (-15 each)
 - `DOUBLED_PAWN_PENALTY: i32`, `ISOLATED_PAWN_PENALTY: i32`
 - `rook_bonus(pos, color) -> i32` — open file (+20), semi-open file (+10), 7th rank (+25); bonuses stack
+- `mobility_bonus(pos, color) -> i32` — per-square bonus: Knight=4cp, Bishop=3cp, Rook=2cp, Queen=1cp; uses precomputed knight table + ray walks
+- `KNIGHT_MOBILITY_BONUS`, `BISHOP_MOBILITY_BONUS`, `ROOK_MOBILITY_BONUS`, `QUEEN_MOBILITY_BONUS: i32`
 - `ROOK_OPEN_FILE_BONUS`, `ROOK_SEMI_OPEN_FILE_BONUS`, `ROOK_SEVENTH_RANK_BONUS: i32`
 
 ### `src/search.rs`
@@ -226,7 +228,7 @@ Search improvements (in order):
 
 Evaluation improvements (in order):
 - [x] Endgame phase detection + tapered king piece-square tables (plans/endgame-phase-eval.md)
-- [ ] Mobility bonus for knights, bishops, rooks, queens (plans/mobility-eval.md)
+- [x] Mobility bonus for knights, bishops, rooks, queens (plans/mobility-eval.md)
 
 Long-term:
 - [ ] Remove mailbox `Board` from `Position` (make_move still uses it; `bbs` is rebuilt each move)

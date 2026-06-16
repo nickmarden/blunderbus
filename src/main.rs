@@ -6,6 +6,7 @@ mod movegen;
 mod eval;
 mod search;
 mod zobrist;
+mod tt;
 mod pgn;
 mod options;
 mod cli;

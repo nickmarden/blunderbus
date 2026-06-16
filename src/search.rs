@@ -3,6 +3,7 @@ use std::time::Instant;
 use crate::eval::evaluate;
 use crate::movegen::{generate_legal_moves, Move, MoveKind};
 use crate::position::Position;
+use crate::tt::{Bound, TranspositionTable};
 use crate::types::Color;
 
 const INFINITY: i32 = 1_000_000;
@@ -29,27 +30,32 @@ pub fn quiescence_eval(pos: &Position, qdepth: u32) -> i32 {
 /// Search to `max_depth` using iterative deepening with alpha-beta pruning.
 /// Returns the best move found, its score (side-to-move perspective), and the top `n` candidates.
 ///
+/// `tt` persists across calls so knowledge from earlier moves and shallower depths is reused.
 /// If `deadline` is set, stops after the first depth that completes past the deadline.
-/// The result always reflects a fully completed depth — a half-finished deeper search is discarded.
-pub fn search(pos: &Position, max_depth: u32, game_history: &[u64], qdepth: u32, n: usize, deadline: Option<Instant>) -> SearchResult {
+pub fn search(
+    pos: &Position,
+    max_depth: u32,
+    game_history: &[u64],
+    qdepth: u32,
+    n: usize,
+    deadline: Option<Instant>,
+    tt: &mut TranspositionTable,
+) -> SearchResult {
     let mut result = SearchResult { best_move: None, score: 0, depth: 0, nodes: 0, candidates: Vec::new() };
 
-    // Build the base history: all game positions so far, plus the current position.
-    // Each depth iteration gets a fresh clone so push/pop doesn't bleed between depths.
     let mut base_history = Vec::from(game_history);
     base_history.push(pos.hash);
 
     for depth in 1..=max_depth {
         let mut nodes = 0u64;
         let mut history = base_history.clone();
-        let (score, mv, cands) = negamax_root(pos, depth, &mut nodes, &mut history, qdepth, n);
+        let (score, mv, cands) = negamax_root(pos, depth, &mut nodes, &mut history, qdepth, n, tt);
         result.best_move = mv;
         result.score = score;
         result.depth = depth;
         result.nodes += nodes;
-        result.candidates = cands; // final depth wins
+        result.candidates = cands;
 
-        // Stop iterating if the time budget is exhausted after this depth completes.
         if deadline.map_or(false, |d| Instant::now() >= d) {
             break;
         }
@@ -58,8 +64,15 @@ pub fn search(pos: &Position, max_depth: u32, game_history: &[u64], qdepth: u32,
     result
 }
 
-/// Root call: scores every legal move, returns the best move and the top-n candidates sorted best-first.
-fn negamax_root(pos: &Position, depth: u32, nodes: &mut u64, history: &mut Vec<u64>, qdepth: u32, n: usize) -> (i32, Option<Move>, Vec<(Move, i32)>) {
+fn negamax_root(
+    pos: &Position,
+    depth: u32,
+    nodes: &mut u64,
+    history: &mut Vec<u64>,
+    qdepth: u32,
+    n: usize,
+    tt: &mut TranspositionTable,
+) -> (i32, Option<Move>, Vec<(Move, i32)>) {
     let mut moves = generate_legal_moves(pos);
 
     if moves.is_empty() {
@@ -67,7 +80,10 @@ fn negamax_root(pos: &Position, depth: u32, nodes: &mut u64, history: &mut Vec<u
         return (score, None, Vec::new());
     }
 
-    order_moves(pos, &mut moves);
+    // Use the TT move from the previous iteration (or a prior game search) as the first move
+    // tried at the root. This is the main source of move ordering improvement from the TT.
+    let tt_move = tt.probe(pos.hash).and_then(|e| e.mv);
+    order_moves(pos, &mut moves, tt_move);
 
     let mut scored: Vec<(Move, i32)> = Vec::with_capacity(moves.len());
     let mut alpha = -INFINITY;
@@ -75,7 +91,7 @@ fn negamax_root(pos: &Position, depth: u32, nodes: &mut u64, history: &mut Vec<u
     for mv in &moves {
         let after = pos.make_move(mv);
         history.push(after.hash);
-        let score = -negamax(&after, depth - 1, -INFINITY, -alpha, 1, nodes, history, qdepth);
+        let score = -negamax(&after, depth - 1, -INFINITY, -alpha, 1, nodes, history, qdepth, tt);
         history.pop();
         scored.push((*mv, score));
         if score > alpha {
@@ -83,95 +99,107 @@ fn negamax_root(pos: &Position, depth: u32, nodes: &mut u64, history: &mut Vec<u
         }
     }
 
-    // Sort best-first; stable so tied moves stay in generation order.
     scored.sort_by(|a, b| b.1.cmp(&a.1));
     let best_move = scored.first().map(|(mv, _)| *mv);
-    scored.truncate(n);
 
+    // Store root position as exact (we searched all moves).
+    tt.store(pos.hash, alpha, depth as u8, Bound::Exact, best_move);
+
+    scored.truncate(n);
     (alpha, best_move, scored)
 }
 
-/// Negamax with alpha-beta pruning.
-///
-/// alpha: best score I'm guaranteed so far — I won't accept less.
-/// beta:  best score my opponent is guaranteed — they won't allow more than this.
-///
-/// If score >= beta, the opponent has a refutation elsewhere and won't let me reach this
-/// position — stop searching this branch (beta cutoff).
-fn negamax(pos: &Position, depth: u32, mut alpha: i32, beta: i32, ply: u32, nodes: &mut u64, history: &mut Vec<u64>, qdepth: u32) -> i32 {
+fn negamax(
+    pos: &Position,
+    depth: u32,
+    mut alpha: i32,
+    beta: i32,
+    ply: u32,
+    nodes: &mut u64,
+    history: &mut Vec<u64>,
+    qdepth: u32,
+    tt: &mut TranspositionTable,
+) -> i32 {
     *nodes += 1;
 
-    // pos.hash was pushed by the caller; count occurrences in the full history.
-    // >= 2 means we've been here before — score as draw to prevent cycling.
+    // pos.hash was pushed by the caller; >= 2 occurrences means we've been here — draw.
     let reps = history.iter().filter(|&&h| h == pos.hash).count();
-    if reps >= 2 {
-        return 0;
-    }
+    if reps >= 2 { return 0; }
 
     if depth == 0 {
         return quiescence(pos, alpha, beta, nodes, qdepth);
     }
 
-    if pos.halfmove_clock >= 100 {
-        return 0; // draw by 50-move rule
+    if pos.halfmove_clock >= 100 { return 0; }
+
+    // --- Transposition table probe ---
+    let original_alpha = alpha;
+    let mut beta = beta;
+    let mut tt_move: Option<Move> = None;
+
+    if let Some(entry) = tt.probe(pos.hash) {
+        tt_move = entry.mv; // use for move ordering even when depth is insufficient
+        if entry.depth >= depth as u8 {
+            match entry.bound {
+                Bound::Exact => return entry.score,
+                Bound::Lower => alpha = alpha.max(entry.score),
+                Bound::Upper => beta  = beta.min(entry.score),
+            }
+            if alpha >= beta { return entry.score; }
+        }
     }
 
     let mut moves = generate_legal_moves(pos);
 
     if moves.is_empty() {
         return if pos.is_in_check(pos.side_to_move) {
-            ply as i32 - MATE_SCORE // checkmate; smaller ply = faster mate = preferred
+            ply as i32 - MATE_SCORE // prefer shorter mates
         } else {
             0 // stalemate
         };
     }
 
-    order_moves(pos, &mut moves);
+    order_moves(pos, &mut moves, tt_move);
+
+    let mut best_move: Option<Move> = None;
 
     for mv in &moves {
         let after = pos.make_move(mv);
         history.push(after.hash);
-        let score = -negamax(&after, depth - 1, -beta, -alpha, ply + 1, nodes, history, qdepth);
+        let score = -negamax(&after, depth - 1, -beta, -alpha, ply + 1, nodes, history, qdepth, tt);
         history.pop();
 
         if score >= beta {
-            return beta; // beta cutoff
+            // Beta cutoff: store as lower bound (we stopped early — true score may be higher).
+            tt.store(pos.hash, score, depth as u8, Bound::Lower, Some(*mv));
+            return beta;
         }
         if score > alpha {
             alpha = score;
+            best_move = Some(*mv);
         }
     }
+
+    // Store result. Exact if we raised alpha; Upper bound if all moves failed low.
+    let bound = if alpha > original_alpha { Bound::Exact } else { Bound::Upper };
+    tt.store(pos.hash, alpha, depth as u8, bound, best_move);
 
     alpha
 }
 
-/// Quiescence search: after the main search horizon, keep searching captures until the
-/// position is "quiet" (no captures available). Prevents the horizon effect where the
-/// engine mis-evaluates positions with hanging pieces at the leaf node.
-///
-/// Uses the "stand-pat" score (eval without capturing) as a lower bound: if doing nothing
-/// is already good enough, we don't need to look at captures.
 fn quiescence(pos: &Position, mut alpha: i32, beta: i32, nodes: &mut u64, qdepth: u32) -> i32 {
     *nodes += 1;
 
     let stand_pat = eval_from_stm(pos);
-    if stand_pat >= beta {
-        return beta; // opponent won't allow this position — cut off
-    }
-    if stand_pat > alpha {
-        alpha = stand_pat;
-    }
+    if stand_pat >= beta { return beta; }
+    if stand_pat > alpha { alpha = stand_pat; }
 
-    // Cap: if qdepth is exhausted, return the stand-pat score without looking at captures.
-    if qdepth == 0 {
-        return alpha;
-    }
+    if qdepth == 0 { return alpha; }
 
-    // Only examine captures (and en passant and promotions, which are also forcing).
     let captures: Vec<_> = generate_legal_moves(pos)
         .into_iter()
         .filter(|mv| {
-            pos.board.get(mv.to).is_some()
+            pos.bbs.occupancy().contains(mv.to)
                 || mv.kind == MoveKind::EnPassant
                 || matches!(mv.kind, MoveKind::Promotion(_))
         })
@@ -180,65 +208,57 @@ fn quiescence(pos: &Position, mut alpha: i32, beta: i32, nodes: &mut u64, qdepth
     for mv in &captures {
         let after = pos.make_move(mv);
         let score = -quiescence(&after, -beta, -alpha, nodes, qdepth - 1);
-        if score >= beta {
-            return beta;
-        }
-        if score > alpha {
-            alpha = score;
-        }
+        if score >= beta { return beta; }
+        if score > alpha { alpha = score; }
     }
 
     alpha
 }
 
-/// Flip the White-perspective eval score to the side-to-move's perspective.
 fn eval_from_stm(pos: &Position) -> i32 {
     let raw = evaluate(pos);
     if pos.side_to_move == Color::White { raw } else { -raw }
 }
 
-/// Captures before quiet moves — the cheapest move ordering improvement.
-/// Better ordering means alpha rises faster, beta cutoffs trigger earlier.
-fn order_moves(pos: &Position, moves: &mut Vec<Move>) {
+/// Order moves for alpha-beta efficiency: TT move first, then captures, then quiet moves.
+/// The TT move is typically the best move from a previous search at this position.
+fn order_moves(pos: &Position, moves: &mut Vec<Move>, tt_move: Option<Move>) {
     moves.sort_by_key(|mv| {
-        if pos.board.get(mv.to).is_some() || mv.kind == MoveKind::EnPassant {
-            0
-        } else {
-            1
-        }
+        if tt_move == Some(*mv) { 0 }
+        else if pos.bbs.occupancy().contains(mv.to) || mv.kind == MoveKind::EnPassant { 1 }
+        else { 2 }
     });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::position::Position;
+
+    fn tt() -> TranspositionTable { TranspositionTable::new() }
 
     #[test]
     fn starting_position_returns_a_move() {
         let pos = Position::starting_position();
-        let result = search(&pos, 2, &[], 6, 3, None);
+        let result = search(&pos, 2, &[], 6, 3, None, &mut tt());
         assert!(result.best_move.is_some());
     }
 
     #[test]
     fn checkmate_position_returns_no_move() {
-        // Scholar's mate: Black is already checkmated
         let pos = Position::from_fen(
             "r1bqkb1r/pppp1Qpp/2n2n2/4p3/2B1P3/8/PPPP1PPP/RNB1K1NR b KQkq - 0 4"
         ).unwrap();
-        let result = search(&pos, 1, &[], 6, 3, None);
+        let result = search(&pos, 1, &[], 6, 3, None, &mut tt());
         assert!(result.best_move.is_none());
         assert!(result.score <= -MATE_SCORE + 10);
     }
 
     #[test]
     fn finds_mate_in_one() {
-        // White Ra1, Kg1 vs Black Kg8 with pawns on f7/g7/h7 — Ra8 is checkmate.
-        // Requires depth=2: one ply for White's move, one more to detect Black has no reply.
         let pos = Position::from_fen("6k1/5ppp/8/8/8/8/8/R5K1 w - - 0 1").unwrap();
-        let result = search(&pos, 2, &[], 6, 3, None);
+        let result = search(&pos, 2, &[], 6, 3, None, &mut tt());
         assert!(result.best_move.is_some());
-        // Score should indicate we deliver checkmate — much higher than any material score
         assert!(result.score >= MATE_SCORE - 10,
             "expected mate score, got {}", result.score);
     }
@@ -246,47 +266,47 @@ mod tests {
     #[test]
     fn candidates_sorted_best_first() {
         let pos = Position::starting_position();
-        let result = search(&pos, 2, &[], 6, 3, None);
+        let result = search(&pos, 2, &[], 6, 3, None, &mut tt());
         let cands = &result.candidates;
-        assert!(!cands.is_empty(), "should have at least one candidate");
-        assert_eq!(cands[0].0, result.best_move.unwrap(), "first candidate must be the best move");
+        assert!(!cands.is_empty());
+        assert_eq!(cands[0].0, result.best_move.unwrap());
         for i in 1..cands.len() {
-            assert!(cands[i].1 <= cands[i - 1].1, "candidates must be sorted best-first");
+            assert!(cands[i].1 <= cands[i - 1].1);
         }
     }
 
     #[test]
     fn candidates_truncated_to_n() {
         let pos = Position::starting_position();
-        let result = search(&pos, 2, &[], 6, 3, None);
-        assert!(result.candidates.len() <= 3, "should have at most 3 candidates");
+        let result = search(&pos, 2, &[], 6, 3, None, &mut tt());
+        assert!(result.candidates.len() <= 3);
     }
 
     #[test]
     fn candidates_fewer_than_n_when_few_legal_moves() {
-        // Only one legal move: king must capture the attacker.
-        // White Ke1, Black Ra2 + Rb2 giving check — Kd1/Kf1 both covered, must take on a2 or b2...
-        // Simpler: use a position with exactly 1 legal move.
-        // White king on a1, Black rooks on b3+c2 — king must go to a2 (only legal move... let's verify)
-        // Actually let's just use the mate-in-one position from above where there's exactly 1 winning move
-        // and confirm candidates.len() == legal_moves.len() when legal < n.
-        // Use a very constrained position: White Kg1, Rook a1 vs Black Kh8 — Black has few moves
         let pos = Position::from_fen("7k/8/8/8/8/8/8/R5K1 b - - 0 1").unwrap();
-        let result = search(&pos, 1, &[], 0, 5, None);
+        let result = search(&pos, 1, &[], 0, 5, None, &mut tt());
         let legal = crate::movegen::generate_legal_moves(&pos);
         assert_eq!(result.candidates.len(), legal.len().min(5));
     }
 
     #[test]
     fn stalemate_scores_zero() {
-        // Classic stalemate: Black king trapped with no moves, not in check
-        // White: Qa6, Ka8. Black: Ka1. It's Black's turn — stalemate.
-        // Actually let's use: White Kc6, Qd6, Black Ka8 — Black to move, stalemate
         let pos = Position::from_fen("k7/8/KQK5/8/8/8/8/8 b - - 0 1").unwrap();
-        // If this is actually stalemate, search returns no move and score 0
-        let result = search(&pos, 1, &[], 6, 3, None);
+        let result = search(&pos, 1, &[], 6, 3, None, &mut tt());
         if result.best_move.is_none() {
-            assert_eq!(result.score, 0, "stalemate should score 0");
+            assert_eq!(result.score, 0);
         }
+    }
+
+    #[test]
+    fn tt_improves_node_count() {
+        // With a warm TT, a second search of the same position should visit fewer nodes.
+        let pos = Position::starting_position();
+        let mut tt = TranspositionTable::new();
+        let r1 = search(&pos, 4, &[], 0, 3, None, &mut tt);
+        let r2 = search(&pos, 4, &[], 0, 3, None, &mut tt);
+        assert!(r2.nodes < r1.nodes,
+            "warm TT should reduce node count: first={} second={}", r1.nodes, r2.nodes);
     }
 }

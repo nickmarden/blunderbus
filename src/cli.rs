@@ -6,6 +6,7 @@ use crate::options::CliOptions;
 use crate::pgn;
 use crate::position::Position;
 use crate::search::{quiescence_eval, search};
+use crate::tt::TranspositionTable;
 use crate::types::{Color, Piece, PieceKind, Square};
 
 /// Run an interactive game loop. Human plays White by default; use --black to flip.
@@ -15,6 +16,7 @@ pub fn run(opts: CliOptions) {
     let mut san_moves: Vec<String> = Vec::new();  // SAN transcript for PGN output
     let mut rng: u64 = SystemTime::now()
         .duration_since(UNIX_EPOCH).unwrap().subsec_nanos() as u64;
+    let mut tt = TranspositionTable::new();
 
     println!("Blunderbus Chess Engine");
     println!("You are playing {}.", color_name(opts.human_color));
@@ -65,7 +67,7 @@ pub fn run(opts: CliOptions) {
         if pos.side_to_move == opts.human_color {
             if opts.auto {
                 // Auto mode: engine picks the human's move too.
-                let result = search(&pos, opts.depth, &game_history, opts.qdepth, opts.candidates, None);
+                let result = search(&pos, opts.depth, &game_history, opts.qdepth, opts.candidates, None, &mut tt);
                 let best = result.best_move.expect("legal moves exist but search returned none");
                 let mv = select_move(&result.candidates, best, opts.strength, &mut rng);
                 if opts.pretty && !opts.no_clear_screen {
@@ -88,7 +90,7 @@ pub fn run(opts: CliOptions) {
                         print!("Hint: thinking...");
                         io::stdout().flush().ok();
                     }
-                    let r = search(&pos, opts.depth, &game_history, opts.qdepth, opts.candidates, None);
+                    let r = search(&pos, opts.depth, &game_history, opts.qdepth, opts.candidates, None, &mut tt);
                     if opts.show_hint {
                         print!("\r                  \r"); // erase "Hint: thinking..."
                         io::stdout().flush().ok();
@@ -141,7 +143,7 @@ pub fn run(opts: CliOptions) {
             // Engine turn
             print!("Engine thinking...");
             io::stdout().flush().ok();
-            let result = search(&pos, opts.depth, &game_history, opts.qdepth, opts.candidates, None);
+            let result = search(&pos, opts.depth, &game_history, opts.qdepth, opts.candidates, None, &mut tt);
             println!();
 
             if opts.pretty && !opts.no_clear_screen {

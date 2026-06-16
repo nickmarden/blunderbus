@@ -6,6 +6,7 @@ use crate::movegen::generate_legal_moves;
 use crate::options::CliOptions;
 use crate::position::Position;
 use crate::search::search;
+use crate::tt::TranspositionTable;
 use crate::types::Color;
 
 /// Run the UCI protocol loop, reading commands from stdin and writing responses to stdout.
@@ -15,6 +16,7 @@ use crate::types::Color;
 pub fn run(opts: &CliOptions) {
     let mut pos = Position::starting_position();
     let mut game_history: Vec<u64> = Vec::new();
+    let mut tt = TranspositionTable::new();
 
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
@@ -41,6 +43,7 @@ pub fn run(opts: &CliOptions) {
             "ucinewgame" => {
                 pos = Position::starting_position();
                 game_history.clear();
+                tt.clear();
             }
             "position" => {
                 if let Some((p, h)) = parse_position(&tokens[1..]) {
@@ -52,7 +55,7 @@ pub fn run(opts: &CliOptions) {
                 let go = parse_go(&tokens[1..], pos.side_to_move, opts.depth);
                 let result = search(
                     &pos, go.max_depth, &game_history,
-                    opts.qdepth, opts.candidates, go.deadline,
+                    opts.qdepth, opts.candidates, go.deadline, &mut tt,
                 );
 
                 let pv = result.best_move

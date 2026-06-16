@@ -25,6 +25,8 @@ pub struct CliOptions {
     pub qdepth: u32,
     /// How many top candidate moves to retain after search (default 3).
     pub candidates: usize,
+    /// Engine strength 0-100. 100 = always best move; 0 = random among top candidates (default 100).
+    pub strength: u8,
 }
 
 impl CliOptions {
@@ -54,6 +56,12 @@ impl CliOptions {
             .and_then(|w| w[1].parse::<usize>().ok())
             .unwrap_or(3);
 
+        let strength = args.windows(2)
+            .find(|w| w[0] == "--strength")
+            .and_then(|w| w[1].parse::<u8>().ok())
+            .map(|s| s.min(100))
+            .unwrap_or(100);
+
         let human_color = if args.iter().any(|a| a == "--black") {
             Color::Black
         } else if args.iter().any(|a| a == "--random-color") {
@@ -63,6 +71,6 @@ impl CliOptions {
             Color::White
         };
 
-        CliOptions { show_eval, show_hint, depth, qdepth, candidates, pretty, auto, human_color, show_fen, show_pgn, no_clear_screen }
+        CliOptions { show_eval, show_hint, depth, qdepth, candidates, strength, pretty, auto, human_color, show_fen, show_pgn, no_clear_screen }
     }
 }

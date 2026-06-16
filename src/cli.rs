@@ -1,4 +1,5 @@
 use std::io::{self, Write};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::movegen::{generate_legal_moves, Move, MoveKind};
 use crate::options::CliOptions;
@@ -12,6 +13,8 @@ pub fn run(opts: CliOptions) {
     let mut pos = Position::starting_position();
     let mut game_history: Vec<u64> = Vec::new(); // position hashes before the current position
     let mut san_moves: Vec<String> = Vec::new();  // SAN transcript for PGN output
+    let mut rng: u64 = SystemTime::now()
+        .duration_since(UNIX_EPOCH).unwrap().subsec_nanos() as u64;
 
     println!("Blunderbus Chess Engine");
     println!("You are playing {}.", color_name(opts.human_color));
@@ -63,7 +66,8 @@ pub fn run(opts: CliOptions) {
             if opts.auto {
                 // Auto mode: engine picks the human's move too.
                 let result = search(&pos, opts.depth, &game_history, opts.qdepth, opts.candidates);
-                let mv = result.best_move.expect("legal moves exist but search returned none");
+                let best = result.best_move.expect("legal moves exist but search returned none");
+                let mv = select_move(&result.candidates, best, opts.strength, &mut rng);
                 if opts.pretty && !opts.no_clear_screen {
                     print!("\x1b[H\x1b[2J");
                     io::stdout().flush().ok();
@@ -150,7 +154,9 @@ pub fn run(opts: CliOptions) {
                 println!("Eval: {white_score:+} cp  (positive = White ahead)");
             }
 
-            match result.best_move {
+            let engine_mv = result.best_move
+                .map(|best| select_move(&result.candidates, best, opts.strength, &mut rng));
+            match engine_mv {
                 Some(mv) => {
                     let label = move_label(&mv);
                     println!("Engine plays: {label}  (score {}, {} nodes)", result.score, result.nodes);
@@ -334,5 +340,71 @@ fn color_name(color: Color) -> &'static str {
     match color {
         Color::White => "White",
         Color::Black => "Black",
+    }
+}
+
+/// Pick a move from `candidates` based on `strength` (0–100).
+/// At 100 always returns `best`; at 0 picks uniformly at random from `candidates`;
+/// at intermediate values picks randomly with probability `(100 - strength)%`.
+fn select_move(candidates: &[(Move, i32)], best: Move, strength: u8, rng: &mut u64) -> Move {
+    if strength >= 100 || candidates.len() <= 1 {
+        return best;
+    }
+    let roll = lcg_next(rng) % 100;
+    if roll < (100 - strength) as u64 {
+        let idx = lcg_next(rng) as usize % candidates.len();
+        candidates[idx].0
+    } else {
+        best
+    }
+}
+
+/// Knuth multiplicative LCG — fast, no dependencies, good enough for strength randomisation.
+fn lcg_next(state: &mut u64) -> u64 {
+    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    *state
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{Color, PieceKind};
+    use crate::movegen::MoveKind;
+
+    fn dummy_move(from_idx: u8, to_idx: u8) -> Move {
+        Move { from: Square::new(from_idx), to: Square::new(to_idx), kind: MoveKind::Normal }
+    }
+
+    #[test]
+    fn select_move_strength_100_always_best() {
+        let best = dummy_move(0, 8);
+        let candidates = vec![(best, 100), (dummy_move(1, 9), 50), (dummy_move(2, 10), 10)];
+        let mut rng = 12345u64;
+        for _ in 0..20 {
+            assert_eq!(select_move(&candidates, best, 100, &mut rng), best);
+        }
+    }
+
+    #[test]
+    fn select_move_single_candidate_always_best() {
+        let best = dummy_move(0, 8);
+        let candidates = vec![(best, 100)];
+        let mut rng = 99u64;
+        for _ in 0..20 {
+            assert_eq!(select_move(&candidates, best, 0, &mut rng), best);
+        }
+    }
+
+    #[test]
+    fn select_move_strength_0_picks_from_pool() {
+        let best = dummy_move(0, 8);
+        let alt1 = dummy_move(1, 9);
+        let alt2 = dummy_move(2, 10);
+        let candidates = vec![(best, 100), (alt1, 50), (alt2, 10)];
+        let mut rng = 1u64;
+        // At strength 0, over many draws at least one non-best move should appear.
+        let chosen: Vec<Move> = (0..100).map(|_| select_move(&candidates, best, 0, &mut rng)).collect();
+        let non_best = chosen.iter().filter(|&&m| m != best).count();
+        assert!(non_best > 0, "strength 0 should sometimes pick a non-best candidate");
     }
 }

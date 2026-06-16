@@ -46,6 +46,11 @@ impl Bitboard {
 
     pub fn popcount(self) -> u32 { self.0.count_ones() }
 
+    /// Return the square of the lowest-index set bit (does not modify self).
+    pub fn lsb(self) -> Square {
+        Square::new(self.0.trailing_zeros() as u8)
+    }
+
     /// Remove and return the lowest-index set bit.
     pub fn pop_lsb(&mut self) -> Square {
         let idx = self.0.trailing_zeros() as u8;

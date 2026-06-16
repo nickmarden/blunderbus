@@ -127,48 +127,52 @@ fn gen_king_moves(pos: &Position, from: Square, color: Color, moves: &mut Vec<Mo
 
 // --- Sliding pieces ---
 
-fn gen_ray_moves(
+// Each array holds the bitboard shift functions for that piece's movement directions.
+// Shift functions handle edge masking internally (east/west mask FILE_H/FILE_A before shifting).
+const ROOK_SHIFTS:   [fn(Bitboard) -> Bitboard; 4] = [
+    Bitboard::north, Bitboard::south, Bitboard::east, Bitboard::west,
+];
+const BISHOP_SHIFTS: [fn(Bitboard) -> Bitboard; 4] = [
+    Bitboard::north_east, Bitboard::north_west, Bitboard::south_east, Bitboard::south_west,
+];
+const QUEEN_SHIFTS:  [fn(Bitboard) -> Bitboard; 8] = [
+    Bitboard::north, Bitboard::south, Bitboard::east, Bitboard::west,
+    Bitboard::north_east, Bitboard::north_west, Bitboard::south_east, Bitboard::south_west,
+];
+
+/// Walk each ray direction one step at a time using bitboard shifts.
+/// The shift function's edge masking replaces the old in_bounds check.
+fn gen_slider_moves(
     pos: &Position,
     from: Square,
     color: Color,
-    directions: &[(i8, i8)],
+    shifts: &[fn(Bitboard) -> Bitboard],
     moves: &mut Vec<Move>,
 ) {
-    let (file, rank) = (from.file() as i8, from.rank() as i8);
-    for &(df, dr) in directions {
-        let (mut f, mut r) = (file + df, rank + dr);
-        while in_bounds(f, r) {
-            let to = Square::from_file_rank(f as u8, r as u8);
-            if let Some(piece) = pos.board.get(to) {
-                if piece.color != color {
-                    moves.push(Move::normal(from, to)); // capture
-                }
-                break; // blocked regardless
-            }
-            moves.push(Move::normal(from, to));
-            f += df;
-            r += dr;
+    let own_occ = pos.bbs.color_occupancy(color);
+    let any_occ = pos.bbs.occupancy();
+    let from_bb = Bitboard::from_square(from);
+    for &shift in shifts {
+        let mut cur = shift(from_bb);
+        while !cur.is_empty() {
+            if !(cur & own_occ).is_empty() { break; } // own piece: stop without moving here
+            moves.push(Move::normal(from, cur.lsb()));
+            if !(cur & any_occ).is_empty() { break; } // any piece: stop after capturing
+            cur = shift(cur);
         }
     }
 }
 
-const ROOK_DIRS:   [(i8, i8); 4] = [(0, 1), (0, -1), (1, 0), (-1, 0)];
-const BISHOP_DIRS: [(i8, i8); 4] = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
-const QUEEN_DIRS:  [(i8, i8); 8] = [
-    (0, 1), (0, -1), (1, 0), (-1, 0),
-    (1, 1), (1, -1), (-1, 1), (-1, -1),
-];
-
 fn gen_rook_moves(pos: &Position, from: Square, color: Color, moves: &mut Vec<Move>) {
-    gen_ray_moves(pos, from, color, &ROOK_DIRS, moves);
+    gen_slider_moves(pos, from, color, &ROOK_SHIFTS, moves);
 }
 
 fn gen_bishop_moves(pos: &Position, from: Square, color: Color, moves: &mut Vec<Move>) {
-    gen_ray_moves(pos, from, color, &BISHOP_DIRS, moves);
+    gen_slider_moves(pos, from, color, &BISHOP_SHIFTS, moves);
 }
 
 fn gen_queen_moves(pos: &Position, from: Square, color: Color, moves: &mut Vec<Move>) {
-    gen_ray_moves(pos, from, color, &QUEEN_DIRS, moves);
+    gen_slider_moves(pos, from, color, &QUEEN_SHIFTS, moves);
 }
 
 // --- Pawns ---
@@ -298,13 +302,6 @@ fn push_promotions(from: Square, to: Square, moves: &mut Vec<Move>) {
         moves.push(Move { from, to, kind: MoveKind::Promotion(kind) });
     }
 }
-
-// --- Helpers ---
-
-fn in_bounds(file: i8, rank: i8) -> bool {
-    file >= 0 && file < 8 && rank >= 0 && rank < 8
-}
-
 
 /// Count all legal positions reachable at exactly `depth` half-moves.
 /// The well-known starting-position values are the gold standard for move generator correctness.
@@ -478,5 +475,39 @@ mod tests {
         let moves = generate_pseudo_legal_moves(&pos);
         let pawn_moves: Vec<_> = moves.iter().filter(|m| m.from == sq).collect();
         assert_eq!(pawn_moves.len(), 2, "black d7 pawn should have single and double push");
+    }
+
+    // Slider move generation via bitboard shifts.
+
+    #[test]
+    fn rook_on_empty_board_has_14_moves() {
+        // Rook on e4, kings off the e-file so no ray is blocked: 7 rank + 7 file = 14.
+        let pos = Position::from_fen("8/8/8/8/4R3/8/8/K6k w - - 0 1").unwrap();
+        let sq = parse_sq("e4");
+        let moves = generate_pseudo_legal_moves(&pos);
+        let rook_moves: Vec<_> = moves.iter().filter(|m| m.from == sq).collect();
+        assert_eq!(rook_moves.len(), 14);
+    }
+
+    #[test]
+    fn rook_blocked_by_own_piece_stops_before_it() {
+        // White rook on a1, white pawn on a4 — rook can only go a2, a3 northward.
+        let pos = Position::from_fen("8/8/8/8/P7/8/8/R3K2k w - - 0 1").unwrap();
+        let sq = parse_sq("a1");
+        let moves = generate_pseudo_legal_moves(&pos);
+        let northward: Vec<_> = moves.iter()
+            .filter(|m| m.from == sq && m.to.file() == 0 && m.to.rank() > 0)
+            .collect();
+        assert_eq!(northward.len(), 2, "rook should reach a2 and a3 but not beyond the pawn on a4");
+    }
+
+    #[test]
+    fn bishop_on_empty_board_has_13_moves() {
+        // Bishop on d4 (center-ish): sum of all diagonal squares = 13.
+        let pos = Position::from_fen("8/8/8/8/3B4/8/8/4K2k w - - 0 1").unwrap();
+        let sq = parse_sq("d4");
+        let moves = generate_pseudo_legal_moves(&pos);
+        let bishop_moves: Vec<_> = moves.iter().filter(|m| m.from == sq).collect();
+        assert_eq!(bishop_moves.len(), 13);
     }
 }

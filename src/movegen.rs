@@ -104,9 +104,11 @@ fn gen_king_moves(pos: &Position, from: Square, color: Color, moves: &mut Vec<Mo
         }
     }
 
-    // Castling (pseudo-legal: we don't yet check for moving through check)
+    // Castling: squares must be empty, and the king must not start in check,
+    // pass through an attacked square, or land on an attacked square.
     let back_rank = color.back_rank();
     let rights = pos.castling;
+    let opp = color.opposite();
 
     let (can_kingside, can_queenside) = match color {
         Color::White => (rights.white_kingside, rights.white_queenside),
@@ -116,7 +118,12 @@ fn gen_king_moves(pos: &Position, from: Square, color: Color, moves: &mut Vec<Mo
     if can_kingside {
         let f1 = Square::from_file_rank(5, back_rank);
         let g1 = Square::from_file_rank(6, back_rank);
-        if pos.board.get(f1).is_none() && pos.board.get(g1).is_none() {
+        if pos.board.get(f1).is_none()
+            && pos.board.get(g1).is_none()
+            && !pos.is_square_attacked(from, opp)
+            && !pos.is_square_attacked(f1, opp)
+            && !pos.is_square_attacked(g1, opp)
+        {
             moves.push(Move { from, to: g1, kind: MoveKind::CastleKingside });
         }
     }
@@ -125,7 +132,13 @@ fn gen_king_moves(pos: &Position, from: Square, color: Color, moves: &mut Vec<Mo
         let b1 = Square::from_file_rank(1, back_rank);
         let c1 = Square::from_file_rank(2, back_rank);
         let d1 = Square::from_file_rank(3, back_rank);
-        if pos.board.get(b1).is_none() && pos.board.get(c1).is_none() && pos.board.get(d1).is_none() {
+        if pos.board.get(b1).is_none()
+            && pos.board.get(c1).is_none()
+            && pos.board.get(d1).is_none()
+            && !pos.is_square_attacked(from, opp)
+            && !pos.is_square_attacked(d1, opp)
+            && !pos.is_square_attacked(c1, opp)
+        {
             moves.push(Move { from, to: c1, kind: MoveKind::CastleQueenside });
         }
     }
@@ -356,5 +369,34 @@ mod tests {
     #[test]
     fn pawn_on_e2_has_two_moves() {
         assert_eq!(count_moves(&starting_pos(), "e2"), 2);
+    }
+
+    // Castling legality: king may not castle through or out of check.
+
+    #[test]
+    fn cannot_castle_kingside_through_check() {
+        // Black rook on f8 covers f1 — White's kingside transit square.
+        let pos = Position::from_fen("5r2/8/8/8/8/8/8/4K2R w K - 0 1").unwrap();
+        let moves = generate_legal_moves(&pos);
+        assert!(!moves.iter().any(|m| m.kind == MoveKind::CastleKingside),
+            "should not be able to castle kingside through f1 while it is attacked");
+    }
+
+    #[test]
+    fn cannot_castle_queenside_through_check() {
+        // Black rook on d8 covers d1 — White's queenside transit square.
+        let pos = Position::from_fen("3r4/8/8/8/8/8/8/R3K3 w Q - 0 1").unwrap();
+        let moves = generate_legal_moves(&pos);
+        assert!(!moves.iter().any(|m| m.kind == MoveKind::CastleQueenside),
+            "should not be able to castle queenside through d1 while it is attacked");
+    }
+
+    #[test]
+    fn cannot_castle_while_in_check() {
+        // Black rook on e8 gives check on e1 — king may not castle out of check.
+        let pos = Position::from_fen("4r3/8/8/8/8/8/8/4K2R w K - 0 1").unwrap();
+        let moves = generate_legal_moves(&pos);
+        assert!(!moves.iter().any(|m| m.kind == MoveKind::CastleKingside),
+            "should not be able to castle while in check");
     }
 }

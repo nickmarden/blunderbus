@@ -44,6 +44,7 @@ Primitive types shared across all modules.
 Bitboard infrastructure. All hot-path code now reads from here rather than the mailbox.
 - File/rank masks: `FILE_A/B/G/H`, `RANK_1` through `RANK_8`
 - `file_mask(file: u8) -> Bitboard` — full-file mask for any file index 0–7
+- `front_fill(bb, color) -> Bitboard` — fills northward (White) or southward (Black) across all 7 ranks; used for passed-pawn detection
 - `ROOK_RAYS: [fn(Bitboard)->Bitboard; 4]` — N/S/E/W shift functions (shared by movegen + position)
 - `BISHOP_RAYS: [fn(Bitboard)->Bitboard; 4]` — NE/NW/SE/SW shift functions
 - `Bitboard(pub u64)` newtype with `EMPTY`/`FULL`; `from_square`, `contains`, `is_empty`, `popcount`,
@@ -97,6 +98,8 @@ Static evaluation from White's perspective (positive = White ahead, negative = B
   `QUEEN_TABLE`, `KING_TABLE` — written rank 8 (top) to rank 1 (bottom)
 - `king_safety_penalty(pos, color) -> i32` — pawn shield (-20 missing / -10 advanced per file)
   + open/semi-open file near king (-25 / -10 per file); only near back rank
+- `passed_pawn_bonus(pos, color) -> i32` — bitboard front-fill detection; rank-scaled bonus table `[0,0,10,20,35,55,80,0]`
+- `PASSED_PAWN_BONUS: [i32; 8]` — rank-indexed bonus (rank 0-based from pawn's own perspective)
 
 ### `src/search.rs`
 - `SearchResult { best_move: Option<Move>, score: i32, depth: u32, nodes: u64, candidates: Vec<(Move, i32)> }`
@@ -185,7 +188,7 @@ UCI (Universal Chess Interface) protocol loop for GUI integration and Lichess bo
 - [x] Zobrist hashing (deterministic, xorshift64)
 - [x] Threefold repetition detection (in search and game loop)
 - [x] 50-move rule (in search and game loop)
-- [x] Static evaluation: material + piece-square tables + king safety (bitboard iteration)
+- [x] Static evaluation: material + piece-square tables + king safety + passed pawns (bitboard iteration)
 - [x] Transposition table (Zobrist hash → score/move/bound; always-replace, 1M entries ~24 MB)
 - [x] Search: negamax with alpha-beta pruning
 - [x] Iterative deepening (1 to max_depth) with optional time deadline
@@ -209,10 +212,10 @@ None currently known.
 ### TODO
 
 - [ ] Better move ordering: killer moves, history heuristic
-- [ ] Evaluation: passed pawns (plans/passed-pawns-eval.md)
-- [ ] Evaluation: pawn structure — doubled/isolated penalties (plans/pawn-structure-eval.md)
-- [ ] Evaluation: rook on open file / 7th rank (plans/rook-open-file-eval.md)
-- [ ] Evaluation: endgame phase detection + active king table (plans/endgame-phase-eval.md)
+- [x] Evaluation: passed pawns (plans/passed-pawns-eval.md)
+- [ ] Evaluation: pawn structure — doubled/isolated pawns (plans/pawn-structure-eval.md)
+- [ ] Evaluation: rook on open/semi-open file (plans/rook-open-file-eval.md)
+- [ ] Evaluation: endgame phase detection + adjusted piece-square tables (plans/endgame-phase-eval.md; implement last)
 - [ ] Remove mailbox `Board` from `Position` (make_move still uses it; `bbs` is rebuilt each move)
 - [ ] Lichess bot deployment via Lichess Bot API + `--uci` mode
 - [ ] LLM experiment: board state as token sequence, move prediction as next-token generation

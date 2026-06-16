@@ -27,6 +27,18 @@ pub fn file_mask(file: u8) -> Bitboard {
     Bitboard(0x0101_0101_0101_0101u64 << file)
 }
 
+/// Fill `bb` in the direction `color`'s pawns advance (north for White, south for Black),
+/// propagating set bits across all 7 remaining ranks.
+/// Used to build front spans for passed-pawn detection.
+pub fn front_fill(bb: Bitboard, color: Color) -> Bitboard {
+    let mut result = bb;
+    match color {
+        Color::White => { for _ in 0..7 { result = result | result.north(); } }
+        Color::Black => { for _ in 0..7 { result = result | result.south(); } }
+    }
+    result
+}
+
 // --- Bitboard newtype ---
 
 /// A set of up to 64 squares encoded as a bitmask.

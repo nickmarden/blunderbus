@@ -213,6 +213,7 @@ def main():
         if black_losses:
             black_game_acpls.append(b_acpl)
         print(f"W-ACPL={w_acpl:.0f}  B-ACPL={b_acpl:.0f}")
+        print(pgn)
 
     engine.quit()
 

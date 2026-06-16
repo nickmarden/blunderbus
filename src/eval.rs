@@ -1,4 +1,4 @@
-use crate::bitboard::file_mask;
+use crate::bitboard::{file_mask, front_fill};
 use crate::position::Position;
 use crate::types::{Color, PieceKind, Square};
 
@@ -18,10 +18,46 @@ pub fn evaluate(pos: &Position) -> i32 {
             }
         }
         score += sign * king_safety_penalty(pos, color);
+        score += sign * passed_pawn_bonus(pos, color);
     }
 
     score
 }
+
+/// Bonus (always >= 0) for passed pawns belonging to `color`.
+///
+/// A pawn is passed when no enemy pawn is on the same file or either adjacent file,
+/// strictly ahead of it.  The bonus scales with how far advanced the passer is.
+fn passed_pawn_bonus(pos: &Position, color: Color) -> i32 {
+    let our_pawns   = pos.bbs.pieces(color, PieceKind::Pawn);
+    let their_pawns = pos.bbs.pieces(color.opposite(), PieceKind::Pawn);
+
+    // Shift enemy pawns one step in their own direction first so that an enemy pawn
+    // on the SAME rank as ours (adjacent file) does not falsely block it.
+    // Then fill in the enemy's direction to cover all squares they shadow toward our side.
+    let shifted = match color {
+        Color::White => their_pawns.south(), // Black pawns shadow squares southward
+        Color::Black => their_pawns.north(), // White pawns shadow squares northward
+    };
+    let span      = front_fill(shifted, color.opposite());
+    let wide_span = span | span.east() | span.west();
+
+    let mut passers = our_pawns & !wide_span;
+    let mut bonus   = 0i32;
+    while !passers.is_empty() {
+        let sq       = passers.pop_lsb();
+        let rank_idx = match color {
+            Color::White => sq.rank() as usize,
+            Color::Black => 7 - sq.rank() as usize,
+        };
+        bonus += PASSED_PAWN_BONUS[rank_idx];
+    }
+    bonus
+}
+
+// Indexed by rank from the pawn's own perspective (0 = home rank, 7 = promotion rank).
+// Ranks 0 and 7 are impossible for a pawn; the rest scale steeply as the passer advances.
+const PASSED_PAWN_BONUS: [i32; 8] = [0, 0, 10, 20, 35, 55, 80, 0];
 
 /// King safety penalty for `color` (always <= 0).
 ///
@@ -242,6 +278,68 @@ mod tests {
 
     #[test]
     fn king_safety_evaluate_still_zero_at_start() {
+        assert_eq!(evaluate(&Position::starting_position()), 0);
+    }
+
+    // --- Passed pawn tests ---
+
+    #[test]
+    fn passed_pawn_no_passers_starting_position() {
+        // Both sides fully blocked — no passed pawns.
+        assert_eq!(passed_pawn_bonus(&Position::starting_position(), Color::White), 0);
+        assert_eq!(passed_pawn_bonus(&Position::starting_position(), Color::Black), 0);
+    }
+
+    #[test]
+    fn passed_pawn_white_passer_on_rank5() {
+        // White pawn on e5, no Black pawns on d/e/f files ahead — clearly passed.
+        let pos = Position::from_fen("4k3/8/8/4P3/8/8/8/4K3 w - - 0 1").unwrap();
+        let bonus = passed_pawn_bonus(&pos, Color::White);
+        assert_eq!(bonus, PASSED_PAWN_BONUS[4], "e5 is rank index 4, bonus should be 35");
+    }
+
+    #[test]
+    fn passed_pawn_bonus_scales_with_rank() {
+        // Same passer on rank 6 should score more than rank 4.
+        let pos_r6 = Position::from_fen("4k3/8/4P3/8/8/8/8/4K3 w - - 0 1").unwrap();
+        let pos_r4 = Position::from_fen("4k3/8/8/8/4P3/8/8/4K3 w - - 0 1").unwrap();
+        assert!(passed_pawn_bonus(&pos_r6, Color::White)
+              > passed_pawn_bonus(&pos_r4, Color::White));
+    }
+
+    #[test]
+    fn passed_pawn_black_passer_detected() {
+        // Black pawn on e4 — no White pawns on d/e/f files ahead for Black.
+        let pos = Position::from_fen("4k3/8/8/8/4p3/8/8/4K3 w - - 0 1").unwrap();
+        let bonus = passed_pawn_bonus(&pos, Color::Black);
+        assert_eq!(bonus, PASSED_PAWN_BONUS[4], "e4 from Black's view is rank index 4");
+    }
+
+    #[test]
+    fn passed_pawn_blocked_by_piece_still_passes() {
+        // White passer on e5 blocked by Black rook on e6 — rook is not a pawn, still passed.
+        let pos = Position::from_fen("4k3/8/4r3/4P3/8/8/8/4K3 w - - 0 1").unwrap();
+        assert!(passed_pawn_bonus(&pos, Color::White) > 0);
+    }
+
+    #[test]
+    fn passed_pawn_adjacent_enemy_same_rank_does_not_block() {
+        // Black pawn on d4, White pawn on e4 — d4 is beside e4, not ahead; e4 is still passed.
+        let pos = Position::from_fen("4k3/8/8/8/3pP3/8/8/4K3 w - - 0 1").unwrap();
+        assert!(passed_pawn_bonus(&pos, Color::White) > 0,
+            "adjacent same-rank enemy pawn should not block the passer");
+    }
+
+    #[test]
+    fn passed_pawn_adjacent_enemy_ahead_does_block() {
+        // Black pawn on d5 is ahead-adjacent to White pawn on e4 — should block.
+        let pos = Position::from_fen("4k3/8/8/3p4/4P3/8/8/4K3 w - - 0 1").unwrap();
+        assert_eq!(passed_pawn_bonus(&pos, Color::White), 0,
+            "enemy pawn on adjacent file ahead should block the passer");
+    }
+
+    #[test]
+    fn passed_pawn_evaluate_still_zero_at_start() {
         assert_eq!(evaluate(&Position::starting_position()), 0);
     }
 

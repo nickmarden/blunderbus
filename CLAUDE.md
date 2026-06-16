@@ -100,6 +100,8 @@ Static evaluation from White's perspective (positive = White ahead, negative = B
   + open/semi-open file near king (-25 / -10 per file); only near back rank
 - `passed_pawn_bonus(pos, color) -> i32` — bitboard front-fill detection; rank-scaled bonus table `[0,0,10,20,35,55,80,0]`
 - `PASSED_PAWN_BONUS: [i32; 8]` — rank-indexed bonus (rank 0-based from pawn's own perspective)
+- `pawn_structure_penalty(pos, color) -> i32` — doubled pawns (-20 per extra) + isolated pawns (-15 each)
+- `DOUBLED_PAWN_PENALTY: i32`, `ISOLATED_PAWN_PENALTY: i32`
 
 ### `src/search.rs`
 - `SearchResult { best_move: Option<Move>, score: i32, depth: u32, nodes: u64, candidates: Vec<(Move, i32)> }`
@@ -213,7 +215,7 @@ None currently known.
 
 - [ ] Better move ordering: killer moves, history heuristic
 - [x] Evaluation: passed pawns (plans/passed-pawns-eval.md)
-- [ ] Evaluation: pawn structure — doubled/isolated pawns (plans/pawn-structure-eval.md)
+- [x] Evaluation: pawn structure — doubled/isolated pawns (plans/pawn-structure-eval.md)
 - [ ] Evaluation: rook on open/semi-open file (plans/rook-open-file-eval.md)
 - [ ] Evaluation: endgame phase detection + adjusted piece-square tables (plans/endgame-phase-eval.md; implement last)
 - [ ] Remove mailbox `Board` from `Position` (make_move still uses it; `bbs` is rebuilt each move)

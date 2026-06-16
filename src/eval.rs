@@ -19,6 +19,7 @@ pub fn evaluate(pos: &Position) -> i32 {
         }
         score += sign * king_safety_penalty(pos, color);
         score += sign * passed_pawn_bonus(pos, color);
+        score += sign * pawn_structure_penalty(pos, color);
     }
 
     score
@@ -58,6 +59,45 @@ fn passed_pawn_bonus(pos: &Position, color: Color) -> i32 {
 // Indexed by rank from the pawn's own perspective (0 = home rank, 7 = promotion rank).
 // Ranks 0 and 7 are impossible for a pawn; the rest scale steeply as the passer advances.
 const PASSED_PAWN_BONUS: [i32; 8] = [0, 0, 10, 20, 35, 55, 80, 0];
+
+/// Pawn structure penalty for `color` (always <= 0).
+///
+/// Two terms:
+///   Doubled pawns: more than one friendly pawn on the same file.
+///     Penalty of DOUBLED_PAWN_PENALTY per extra pawn beyond the first.
+///   Isolated pawns: a pawn with no friendly pawns on either adjacent file.
+///     Penalty of ISOLATED_PAWN_PENALTY per isolated pawn.
+fn pawn_structure_penalty(pos: &Position, color: Color) -> i32 {
+    let pawns = pos.bbs.pieces(color, PieceKind::Pawn);
+    if pawns.is_empty() {
+        return 0;
+    }
+
+    let mut penalty = 0i32;
+
+    for file in 0u8..8 {
+        let on_file = pawns & file_mask(file);
+        if on_file.is_empty() {
+            continue;
+        }
+
+        let count = on_file.popcount();
+        if count > 1 {
+            penalty += (count - 1) as i32 * DOUBLED_PAWN_PENALTY;
+        }
+
+        let left  = if file > 0 { pawns & file_mask(file - 1) } else { crate::bitboard::Bitboard::EMPTY };
+        let right = if file < 7 { pawns & file_mask(file + 1) } else { crate::bitboard::Bitboard::EMPTY };
+        if left.is_empty() && right.is_empty() {
+            penalty += count as i32 * ISOLATED_PAWN_PENALTY;
+        }
+    }
+
+    penalty
+}
+
+const DOUBLED_PAWN_PENALTY:  i32 = -20;
+const ISOLATED_PAWN_PENALTY: i32 = -15;
 
 /// King safety penalty for `color` (always <= 0).
 ///
@@ -383,5 +423,67 @@ mod tests {
     fn queen_advantage_dominates_material() {
         let pos = Position::from_fen("4k3/8/8/8/8/8/8/4KQ2 w - - 0 1").unwrap();
         assert!(evaluate(&pos) > 800, "extra queen should give large positive score");
+    }
+
+    // --- pawn structure tests ---
+
+    #[test]
+    fn pawn_structure_no_weaknesses() {
+        // Consecutive White pawns on d2, e2, f2, g2 — each has a neighbor, none isolated or doubled.
+        let pos = Position::from_fen("4k3/8/8/8/8/8/3PPPP1/4K3 w - - 0 1").unwrap();
+        assert_eq!(pawn_structure_penalty(&pos, Color::White), 0,
+            "consecutive pawns should have no structural penalty");
+    }
+
+    #[test]
+    fn pawn_structure_doubled_pawn_detected() {
+        // White pawns on d2, e2, e4 — doubled on e-file; d2 makes e-file pawns non-isolated.
+        let pos = Position::from_fen("4k3/8/8/8/4P3/8/3PP3/4K3 w - - 0 1").unwrap();
+        assert_eq!(pawn_structure_penalty(&pos, Color::White), DOUBLED_PAWN_PENALTY,
+            "two pawns on same file should give one doubled penalty");
+    }
+
+    #[test]
+    fn pawn_structure_tripled_pawn_detected() {
+        // White pawns on d2, e2, e4, e6 — tripled on e-file; d2 makes e-file pawns non-isolated.
+        let pos = Position::from_fen("4k3/8/4P3/8/4P3/8/3PP3/4K3 w - - 0 1").unwrap();
+        assert_eq!(pawn_structure_penalty(&pos, Color::White), 2 * DOUBLED_PAWN_PENALTY,
+            "three pawns on same file should give two doubled penalties");
+    }
+
+    #[test]
+    fn pawn_structure_isolated_pawn_detected() {
+        // White pawn on a5 only — a-file pawn, no pawns on b-file
+        let pos = Position::from_fen("4k3/8/8/P7/8/8/8/4K3 w - - 0 1").unwrap();
+        assert_eq!(pawn_structure_penalty(&pos, Color::White), ISOLATED_PAWN_PENALTY,
+            "lone pawn on a-file with no b-file neighbor should be isolated");
+    }
+
+    #[test]
+    fn pawn_structure_doubled_and_isolated() {
+        // Two White pawns on a-file, no White pawns on b-file: doubled + isolated
+        let pos = Position::from_fen("4k3/8/8/P7/P7/8/8/4K3 w - - 0 1").unwrap();
+        let expected = DOUBLED_PAWN_PENALTY + 2 * ISOLATED_PAWN_PENALTY;
+        assert_eq!(pawn_structure_penalty(&pos, Color::White), expected,
+            "doubled isolated pawns should accumulate both penalties");
+    }
+
+    #[test]
+    fn pawn_structure_starting_position_zero() {
+        // Starting position is symmetric — both sides have identical structure
+        let pos = Position::starting_position();
+        assert_eq!(pawn_structure_penalty(&pos, Color::White),
+                   pawn_structure_penalty(&pos, Color::Black),
+            "starting position pawn structure should be symmetric");
+        assert_eq!(evaluate(&pos), 0, "starting position overall eval should be zero");
+    }
+
+    #[test]
+    fn pawn_structure_black_weakness_is_positive() {
+        // White: d2, e2 (adjacent, no penalty). Black: e6, e7 (doubled on e-file).
+        let pos = Position::from_fen("4k3/4p3/4p3/8/8/8/3PP3/4K3 w - - 0 1").unwrap();
+        let w_pen = pawn_structure_penalty(&pos, Color::White);
+        let b_pen = pawn_structure_penalty(&pos, Color::Black);
+        assert!(b_pen < w_pen, "Black with doubled pawn should have worse structure penalty");
     }
 }

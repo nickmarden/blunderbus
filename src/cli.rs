@@ -65,7 +65,7 @@ pub fn run(opts: CliOptions) {
         if pos.side_to_move == opts.human_color {
             if opts.auto {
                 // Auto mode: engine picks the human's move too.
-                let result = search(&pos, opts.depth, &game_history, opts.qdepth, opts.candidates);
+                let result = search(&pos, opts.depth, &game_history, opts.qdepth, opts.candidates, None);
                 let best = result.best_move.expect("legal moves exist but search returned none");
                 let mv = select_move(&result.candidates, best, opts.strength, &mut rng);
                 if opts.pretty && !opts.no_clear_screen {
@@ -88,7 +88,7 @@ pub fn run(opts: CliOptions) {
                         print!("Hint: thinking...");
                         io::stdout().flush().ok();
                     }
-                    let r = search(&pos, opts.depth, &game_history, opts.qdepth, opts.candidates);
+                    let r = search(&pos, opts.depth, &game_history, opts.qdepth, opts.candidates, None);
                     if opts.show_hint {
                         print!("\r                  \r"); // erase "Hint: thinking..."
                         io::stdout().flush().ok();
@@ -141,7 +141,7 @@ pub fn run(opts: CliOptions) {
             // Engine turn
             print!("Engine thinking...");
             io::stdout().flush().ok();
-            let result = search(&pos, opts.depth, &game_history, opts.qdepth, opts.candidates);
+            let result = search(&pos, opts.depth, &game_history, opts.qdepth, opts.candidates, None);
             println!();
 
             if opts.pretty && !opts.no_clear_screen {
@@ -263,7 +263,7 @@ fn prompt(message: &str) -> String {
 }
 
 /// Parse a coordinate move string like "e2e4" or "e7e8q" against the list of legal moves.
-fn parse_move(input: &str, legal: &[Move]) -> Result<Move, String> {
+pub(crate) fn parse_move(input: &str, legal: &[Move]) -> Result<Move, String> {
     let bytes = input.as_bytes();
 
     if bytes.len() < 4 {
@@ -319,7 +319,7 @@ fn parse_square(bytes: &[u8]) -> Option<Square> {
     Some(Square::from_file_rank(file_ch - b'a', rank_ch - b'1'))
 }
 
-fn move_label(mv: &Move) -> String {
+pub(crate) fn move_label(mv: &Move) -> String {
     let base = format!("{}{}", mv.from.to_algebraic(), mv.to.to_algebraic());
     match mv.kind {
         MoveKind::Promotion(kind) => {

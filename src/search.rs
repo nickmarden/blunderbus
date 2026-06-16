@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use crate::eval::evaluate;
 use crate::movegen::{generate_legal_moves, Move, MoveKind};
 use crate::position::Position;
@@ -26,7 +28,10 @@ pub fn quiescence_eval(pos: &Position, qdepth: u32) -> i32 {
 
 /// Search to `max_depth` using iterative deepening with alpha-beta pruning.
 /// Returns the best move found, its score (side-to-move perspective), and the top `n` candidates.
-pub fn search(pos: &Position, max_depth: u32, game_history: &[u64], qdepth: u32, n: usize) -> SearchResult {
+///
+/// If `deadline` is set, stops after the first depth that completes past the deadline.
+/// The result always reflects a fully completed depth — a half-finished deeper search is discarded.
+pub fn search(pos: &Position, max_depth: u32, game_history: &[u64], qdepth: u32, n: usize, deadline: Option<Instant>) -> SearchResult {
     let mut result = SearchResult { best_move: None, score: 0, depth: 0, nodes: 0, candidates: Vec::new() };
 
     // Build the base history: all game positions so far, plus the current position.
@@ -43,6 +48,11 @@ pub fn search(pos: &Position, max_depth: u32, game_history: &[u64], qdepth: u32,
         result.depth = depth;
         result.nodes += nodes;
         result.candidates = cands; // final depth wins
+
+        // Stop iterating if the time budget is exhausted after this depth completes.
+        if deadline.map_or(false, |d| Instant::now() >= d) {
+            break;
+        }
     }
 
     result
@@ -206,7 +216,7 @@ mod tests {
     #[test]
     fn starting_position_returns_a_move() {
         let pos = Position::starting_position();
-        let result = search(&pos, 2, &[], 6, 3);
+        let result = search(&pos, 2, &[], 6, 3, None);
         assert!(result.best_move.is_some());
     }
 
@@ -216,7 +226,7 @@ mod tests {
         let pos = Position::from_fen(
             "r1bqkb1r/pppp1Qpp/2n2n2/4p3/2B1P3/8/PPPP1PPP/RNB1K1NR b KQkq - 0 4"
         ).unwrap();
-        let result = search(&pos, 1, &[], 6, 3);
+        let result = search(&pos, 1, &[], 6, 3, None);
         assert!(result.best_move.is_none());
         assert!(result.score <= -MATE_SCORE + 10);
     }
@@ -226,7 +236,7 @@ mod tests {
         // White Ra1, Kg1 vs Black Kg8 with pawns on f7/g7/h7 — Ra8 is checkmate.
         // Requires depth=2: one ply for White's move, one more to detect Black has no reply.
         let pos = Position::from_fen("6k1/5ppp/8/8/8/8/8/R5K1 w - - 0 1").unwrap();
-        let result = search(&pos, 2, &[], 6, 3);
+        let result = search(&pos, 2, &[], 6, 3, None);
         assert!(result.best_move.is_some());
         // Score should indicate we deliver checkmate — much higher than any material score
         assert!(result.score >= MATE_SCORE - 10,
@@ -236,7 +246,7 @@ mod tests {
     #[test]
     fn candidates_sorted_best_first() {
         let pos = Position::starting_position();
-        let result = search(&pos, 2, &[], 6, 3);
+        let result = search(&pos, 2, &[], 6, 3, None);
         let cands = &result.candidates;
         assert!(!cands.is_empty(), "should have at least one candidate");
         assert_eq!(cands[0].0, result.best_move.unwrap(), "first candidate must be the best move");
@@ -248,7 +258,7 @@ mod tests {
     #[test]
     fn candidates_truncated_to_n() {
         let pos = Position::starting_position();
-        let result = search(&pos, 2, &[], 6, 3);
+        let result = search(&pos, 2, &[], 6, 3, None);
         assert!(result.candidates.len() <= 3, "should have at most 3 candidates");
     }
 
@@ -262,7 +272,7 @@ mod tests {
         // and confirm candidates.len() == legal_moves.len() when legal < n.
         // Use a very constrained position: White Kg1, Rook a1 vs Black Kh8 — Black has few moves
         let pos = Position::from_fen("7k/8/8/8/8/8/8/R5K1 b - - 0 1").unwrap();
-        let result = search(&pos, 1, &[], 0, 5);
+        let result = search(&pos, 1, &[], 0, 5, None);
         let legal = crate::movegen::generate_legal_moves(&pos);
         assert_eq!(result.candidates.len(), legal.len().min(5));
     }
@@ -274,7 +284,7 @@ mod tests {
         // Actually let's use: White Kc6, Qd6, Black Ka8 — Black to move, stalemate
         let pos = Position::from_fen("k7/8/KQK5/8/8/8/8/8 b - - 0 1").unwrap();
         // If this is actually stalemate, search returns no move and score 0
-        let result = search(&pos, 1, &[], 6, 3);
+        let result = search(&pos, 1, &[], 6, 3, None);
         if result.best_move.is_none() {
             assert_eq!(result.score, 0, "stalemate should score 0");
         }

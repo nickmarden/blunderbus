@@ -27,6 +27,8 @@ pub struct CliOptions {
     pub candidates: usize,
     /// Engine strength 0-100. 100 = always best move; 0 = random among top candidates (default 100).
     pub strength: u8,
+    /// Run in UCI protocol mode instead of the interactive CLI.
+    pub uci: bool,
 }
 
 impl CliOptions {
@@ -62,6 +64,8 @@ impl CliOptions {
             .map(|s| s.min(100))
             .unwrap_or(100);
 
+        let uci = args.iter().any(|a| a == "--uci");
+
         let human_color = if args.iter().any(|a| a == "--black") {
             Color::Black
         } else if args.iter().any(|a| a == "--random-color") {
@@ -71,6 +75,6 @@ impl CliOptions {
             Color::White
         };
 
-        CliOptions { show_eval, show_hint, depth, qdepth, candidates, strength, pretty, auto, human_color, show_fen, show_pgn, no_clear_screen }
+        CliOptions { show_eval, show_hint, depth, qdepth, candidates, strength, uci, pretty, auto, human_color, show_fen, show_pgn, no_clear_screen }
     }
 }

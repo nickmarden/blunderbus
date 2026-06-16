@@ -8,7 +8,13 @@ mod zobrist;
 mod pgn;
 mod options;
 mod cli;
+mod uci;
 
 fn main() {
-    cli::run(options::CliOptions::from_args());
+    let opts = options::CliOptions::from_args();
+    if opts.uci {
+        uci::run(&opts);
+    } else {
+        cli::run(opts);
+    }
 }

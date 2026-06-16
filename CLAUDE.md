@@ -122,7 +122,8 @@ Static evaluation from White's perspective (positive = White ahead, negative = B
   - Stand-pat score as lower bound; explores captures/en passant/promotions only
   - Returns alpha (stand-pat) immediately when qdepth == 0
 - `pub fn quiescence_eval(pos, qdepth) -> i32` — standalone quiescence, White-perspective score
-- `fn order_moves(pos, moves, tt_move)` — TT move first; captures by MVV-LVA score; promotions; quiet moves last
+- `fn order_moves(pos, moves, tt_move, killers)` — TT move first; captures by MVV-LVA; promotions; killer moves; quiet moves last
+- `KillerTable = [[Option<Move>; 2]; MAX_PLY]` — two quiet beta-cutoff moves per ply, reset each `search()` call
 - `fn eval_from_stm(pos) -> i32` — wraps `evaluate()`, flips sign for Black to move
 
 ### `src/pgn.rs`
@@ -217,7 +218,7 @@ None currently known.
 
 Search improvements (in order):
 - [x] MVV-LVA capture ordering (plans/mvv-lva.md)
-- [ ] Killer move heuristic (plans/killer-moves.md)
+- [x] Killer move heuristic (plans/killer-moves.md)
 - [ ] Null move pruning (plans/null-move-pruning.md)
 - [ ] Late move reductions / LMR (plans/late-move-reductions.md)
 

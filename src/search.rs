@@ -8,6 +8,10 @@ use crate::types::Color;
 
 const INFINITY: i32 = 1_000_000;
 const MATE_SCORE: i32 = 100_000;
+const MAX_PLY: usize = 64;
+
+/// Two quiet moves per ply that caused a beta cutoff — tried before other quiet moves.
+type KillerTable = [[Option<Move>; 2]; MAX_PLY];
 
 pub struct SearchResult {
     pub best_move: Option<Move>,
@@ -45,11 +49,12 @@ pub fn search(
 
     let mut base_history = Vec::from(game_history);
     base_history.push(pos.hash);
+    let mut killers: KillerTable = [[None; 2]; MAX_PLY];
 
     for depth in 1..=max_depth {
         let mut nodes = 0u64;
         let mut history = base_history.clone();
-        let (score, mv, cands) = negamax_root(pos, depth, &mut nodes, &mut history, qdepth, n, tt);
+        let (score, mv, cands) = negamax_root(pos, depth, &mut nodes, &mut history, qdepth, n, tt, &mut killers);
         result.best_move = mv;
         result.score = score;
         result.depth = depth;
@@ -72,6 +77,7 @@ fn negamax_root(
     qdepth: u32,
     n: usize,
     tt: &mut TranspositionTable,
+    killers: &mut KillerTable,
 ) -> (i32, Option<Move>, Vec<(Move, i32)>) {
     let mut moves = generate_legal_moves(pos);
 
@@ -83,7 +89,7 @@ fn negamax_root(
     // Use the TT move from the previous iteration (or a prior game search) as the first move
     // tried at the root. This is the main source of move ordering improvement from the TT.
     let tt_move = tt.probe(pos.hash).and_then(|e| e.mv);
-    order_moves(pos, &mut moves, tt_move);
+    order_moves(pos, &mut moves, tt_move, &killers[0]);
 
     let mut scored: Vec<(Move, i32)> = Vec::with_capacity(moves.len());
     let mut alpha = -INFINITY;
@@ -91,7 +97,7 @@ fn negamax_root(
     for mv in &moves {
         let after = pos.make_move(mv);
         history.push(after.hash);
-        let score = -negamax(&after, depth - 1, -INFINITY, -alpha, 1, nodes, history, qdepth, tt);
+        let score = -negamax(&after, depth - 1, -INFINITY, -alpha, 1, nodes, history, qdepth, tt, killers);
         history.pop();
         scored.push((*mv, score));
         if score > alpha {
@@ -119,6 +125,7 @@ fn negamax(
     history: &mut Vec<u64>,
     qdepth: u32,
     tt: &mut TranspositionTable,
+    killers: &mut KillerTable,
 ) -> i32 {
     *nodes += 1;
 
@@ -159,18 +166,26 @@ fn negamax(
         };
     }
 
-    order_moves(pos, &mut moves, tt_move);
+    let ply_idx = (ply as usize).min(MAX_PLY - 1);
+    order_moves(pos, &mut moves, tt_move, &killers[ply_idx]);
 
     let mut best_move: Option<Move> = None;
 
     for mv in &moves {
         let after = pos.make_move(mv);
         history.push(after.hash);
-        let score = -negamax(&after, depth - 1, -beta, -alpha, ply + 1, nodes, history, qdepth, tt);
+        let score = -negamax(&after, depth - 1, -beta, -alpha, ply + 1, nodes, history, qdepth, tt, killers);
         history.pop();
 
         if score >= beta {
-            // Beta cutoff: store as lower bound (we stopped early — true score may be higher).
+            // Beta cutoff. If this was a quiet move, record it as a killer for this ply.
+            let is_quiet = !pos.bbs.occupancy().contains(mv.to)
+                && mv.kind != MoveKind::EnPassant
+                && !matches!(mv.kind, MoveKind::Promotion(_));
+            if is_quiet {
+                killers[ply_idx][1] = killers[ply_idx][0];
+                killers[ply_idx][0] = Some(*mv);
+            }
             tt.store(pos.hash, score, depth as u8, Bound::Lower, Some(*mv));
             return beta;
         }
@@ -220,17 +235,20 @@ fn eval_from_stm(pos: &Position) -> i32 {
     if pos.side_to_move == Color::White { raw } else { -raw }
 }
 
-/// Order moves for alpha-beta efficiency: TT move first, then captures, then quiet moves.
-/// The TT move is typically the best move from a previous search at this position.
-fn order_moves(pos: &Position, moves: &mut Vec<Move>, tt_move: Option<Move>) {
+/// Order moves for alpha-beta efficiency.
+/// Priority (lower sort key = searched first):
+///   1. TT move (best from prior search at this position)
+///   2. Captures by MVV-LVA (PxQ before QxP)
+///   3. Promotions
+///   4. Killer moves (quiet moves that caused beta cutoffs at this ply)
+///   5. All other quiet moves
+fn order_moves(pos: &Position, moves: &mut Vec<Move>, tt_move: Option<Move>, killers: &[Option<Move>; 2]) {
     moves.sort_by_key(|mv| {
         if tt_move == Some(*mv) {
             return -1_000_000i32;
         }
-        // Captures: scored by MVV-LVA (most valuable victim, least valuable attacker).
-        // Lower sort key = searched first.  PxQ (-8900) before QxP (-100).
+        // Captures: MVV-LVA. En passant = PxP equivalent.
         if mv.kind == MoveKind::EnPassant {
-            // Pawn captures pawn en passant — both pawns worth 100 cp.
             return -(100 * 10 - 100);
         }
         if pos.bbs.occupancy().contains(mv.to) {
@@ -238,11 +256,14 @@ fn order_moves(pos: &Position, moves: &mut Vec<Move>, tt_move: Option<Move>) {
             let attacker = pos.bbs.piece_at(mv.from).map_or(100, |p| material_value(p.kind));
             return -(victim * 10 - attacker);
         }
-        // Promotions are high-value quiet moves; try before ordinary quiet moves.
+        // Promotions before quiet moves.
         if matches!(mv.kind, MoveKind::Promotion(_)) {
             return -800i32;
         }
-        // Quiet moves last.
+        // Killers: tried before ordinary quiet moves.
+        if killers[0] == Some(*mv) { return 9_000i32; }
+        if killers[1] == Some(*mv) { return 9_500i32; }
+        // All other quiet moves.
         10_000i32
     });
 }
@@ -336,7 +357,7 @@ mod tests {
         // MVV-LVA must order PxQ before QxP.
         let pos = Position::from_fen("4k3/8/3q4/2P4Q/7p/8/8/4K3 w - - 0 1").unwrap();
         let mut moves = generate_legal_moves(&pos);
-        order_moves(&pos, &mut moves, None);
+        order_moves(&pos, &mut moves, None, &[None, None]);
 
         let pxq = moves.iter().position(|mv| {
             // c5=file2,rank4 captures d6=file3,rank5
@@ -358,7 +379,7 @@ mod tests {
         // All captures must appear before all quiet moves after ordering.
         let pos = Position::from_fen("4k3/8/3q4/2P4Q/7p/8/8/4K3 w - - 0 1").unwrap();
         let mut moves = generate_legal_moves(&pos);
-        order_moves(&pos, &mut moves, None);
+        order_moves(&pos, &mut moves, None, &[None, None]);
 
         let last_cap = moves.iter().rposition(|mv| {
             pos.bbs.occupancy().contains(mv.to) || mv.kind == MoveKind::EnPassant
@@ -383,7 +404,59 @@ mod tests {
         // Pick any move as the "TT move".
         let tt_move = moves_unsorted[moves_unsorted.len() - 1];
         let mut moves = moves_unsorted;
-        order_moves(&pos, &mut moves, Some(tt_move));
+        order_moves(&pos, &mut moves, Some(tt_move), &[None, None]);
         assert_eq!(moves[0], tt_move, "TT move must be the first move tried");
+    }
+
+    // --- killer move tests ---
+
+    #[test]
+    fn killer_move_sorted_before_quiet() {
+        // A killer move (quiet) must appear before other quiet moves but after captures.
+        let pos = Position::from_fen("4k3/8/3q4/2P4Q/7p/8/8/4K3 w - - 0 1").unwrap();
+        let mut moves = generate_legal_moves(&pos);
+        // Pick a quiet move to designate as killer.
+        let killer = moves.iter().find(|mv| {
+            !pos.bbs.occupancy().contains(mv.to)
+            && mv.kind != MoveKind::EnPassant
+            && !matches!(mv.kind, MoveKind::Promotion(_))
+        }).copied().expect("position should have quiet moves");
+
+        order_moves(&pos, &mut moves, None, &[Some(killer), None]);
+
+        // Find indices.
+        let killer_idx = moves.iter().position(|mv| *mv == killer).unwrap();
+        let last_capture_idx = moves.iter().rposition(|mv| {
+            pos.bbs.occupancy().contains(mv.to) || mv.kind == MoveKind::EnPassant
+        });
+        let first_non_killer_quiet = moves.iter().position(|mv| {
+            !pos.bbs.occupancy().contains(mv.to)
+            && mv.kind != MoveKind::EnPassant
+            && !matches!(mv.kind, MoveKind::Promotion(_))
+            && *mv != killer
+        });
+
+        if let Some(cap_idx) = last_capture_idx {
+            assert!(killer_idx > cap_idx, "killer should come after captures");
+        }
+        if let Some(quiet_idx) = first_non_killer_quiet {
+            assert!(killer_idx < quiet_idx, "killer should come before other quiet moves");
+        }
+    }
+
+    #[test]
+    fn killer_not_in_legal_moves_does_not_crash() {
+        // A killer from a sibling node may not be legal in this position — must not crash or
+        // incorrectly place it first.
+        let pos = Position::starting_position();
+        let mut moves = generate_legal_moves(&pos);
+        // Construct a bogus move that is definitely not in the legal list.
+        let bogus = Move::normal(
+            crate::types::Square::from_file_rank(4, 4),
+            crate::types::Square::from_file_rank(4, 6),
+        );
+        // Should not panic and bogus move should not appear in ordered list.
+        order_moves(&pos, &mut moves, None, &[Some(bogus), None]);
+        assert!(!moves.contains(&bogus), "bogus killer must not be inserted into move list");
     }
 }

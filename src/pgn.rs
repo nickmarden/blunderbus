@@ -18,8 +18,8 @@ pub fn move_to_san(pos: &Position, mv: &Move) -> String {
         _ => {}
     }
 
-    let piece = pos.board.get(mv.from).expect("move_to_san: no piece on from square");
-    let is_capture = pos.board.get(mv.to).is_some() || mv.kind == MoveKind::EnPassant;
+    let piece = pos.bbs.piece_at(mv.from).expect("move_to_san: no piece on from square");
+    let is_capture = pos.bbs.occupancy().contains(mv.to) || mv.kind == MoveKind::EnPassant;
     let mut san = String::new();
 
     if piece.kind == PieceKind::Pawn {
@@ -98,7 +98,7 @@ fn disambiguate(pos: &Position, mv: &Move, kind: PieceKind, san: &mut String) {
         .filter(|m| {
             m.to == mv.to
                 && m.from != mv.from
-                && pos.board.get(m.from).map_or(false, |p| p.kind == kind)
+                && pos.bbs.piece_at(m.from).map_or(false, |p| p.kind == kind)
         })
         .collect();
 

@@ -3,7 +3,7 @@ use std::fmt;
 use crate::bitboard::{king_attacks, knight_attacks, Bitboard, BitboardSet, BISHOP_RAYS, ROOK_RAYS};
 use crate::board::Board;
 use crate::movegen::{Move, MoveKind};
-use crate::types::{Color, Piece, PieceKind, Square};
+use crate::types::{Color, PieceKind, Square};
 use crate::zobrist;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,7 +50,6 @@ impl fmt::Display for CastlingRights {
 
 #[derive(Clone)]
 pub struct Position {
-    pub board: Board,
     pub bbs: BitboardSet,
     pub side_to_move: Color,
     pub castling: CastlingRights,
@@ -75,7 +74,6 @@ impl Position {
         let mut fields = fen.split_whitespace();
 
         let placement = fields.next().ok_or("FEN missing piece placement")?;
-        let board = Board::from_fen_placement(placement)?;
 
         let active = fields.next().ok_or("FEN missing active color")?;
         let side_to_move = match active {
@@ -102,9 +100,8 @@ impl Position {
             .parse::<u32>()
             .map_err(|e| format!("invalid fullmove number: {e}"))?;
 
-        let bbs = BitboardSet::from_board(&board);
+        let bbs = BitboardSet::from_board(&Board::from_fen_placement(placement)?);
         let mut pos = Position {
-            board,
             bbs,
             side_to_move,
             castling,
@@ -120,38 +117,43 @@ impl Position {
     /// Apply a move and return the resulting position. Does not verify legality.
     pub fn make_move(&self, mv: &Move) -> Position {
         let mut pos = self.clone();
-        let piece = self.board.get(mv.from).expect("make_move: no piece on from square");
+        let piece = self.bbs.piece_at(mv.from).expect("make_move: no piece on from square");
+        let from_bb = Bitboard::from_square(mv.from);
+        let to_bb   = Bitboard::from_square(mv.to);
 
-        pos.board.set(mv.from, None);
+        // Remove the moving piece from its source square.
+        *pos.bbs.pieces_mut(piece.color, piece.kind) &= !from_bb;
+
+        // Remove any captured piece from the destination.
+        if let Some(captured) = self.bbs.piece_at(mv.to) {
+            *pos.bbs.pieces_mut(captured.color, captured.kind) &= !to_bb;
+        }
 
         match mv.kind {
             MoveKind::Normal => {
-                pos.board.set(mv.to, Some(piece));
+                *pos.bbs.pieces_mut(piece.color, piece.kind) |= to_bb;
             }
             MoveKind::Promotion(kind) => {
-                pos.board.set(mv.to, Some(Piece::new(piece.color, kind)));
+                *pos.bbs.pieces_mut(piece.color, kind) |= to_bb;
             }
             MoveKind::EnPassant => {
-                pos.board.set(mv.to, Some(piece));
+                *pos.bbs.pieces_mut(piece.color, piece.kind) |= to_bb;
                 // The captured pawn is on the same file as the destination but one rank back.
                 let cap_rank = mv.to.rank() as i8 - piece.color.pawn_direction();
-                pos.board.set(Square::from_file_rank(mv.to.file(), cap_rank as u8), None);
+                let cap_sq = Square::from_file_rank(mv.to.file(), cap_rank as u8);
+                *pos.bbs.pieces_mut(piece.color.opposite(), PieceKind::Pawn) &= !Bitboard::from_square(cap_sq);
             }
             MoveKind::CastleKingside => {
-                pos.board.set(mv.to, Some(piece));
+                *pos.bbs.pieces_mut(piece.color, piece.kind) |= to_bb;
                 let rank = piece.color.back_rank();
-                let rook = pos.board.get(Square::from_file_rank(7, rank))
-                    .expect("kingside rook must exist for castling");
-                pos.board.set(Square::from_file_rank(7, rank), None);
-                pos.board.set(Square::from_file_rank(5, rank), Some(rook));
+                *pos.bbs.pieces_mut(piece.color, PieceKind::Rook) &= !Bitboard::from_square(Square::from_file_rank(7, rank));
+                *pos.bbs.pieces_mut(piece.color, PieceKind::Rook) |=  Bitboard::from_square(Square::from_file_rank(5, rank));
             }
             MoveKind::CastleQueenside => {
-                pos.board.set(mv.to, Some(piece));
+                *pos.bbs.pieces_mut(piece.color, piece.kind) |= to_bb;
                 let rank = piece.color.back_rank();
-                let rook = pos.board.get(Square::from_file_rank(0, rank))
-                    .expect("queenside rook must exist for castling");
-                pos.board.set(Square::from_file_rank(0, rank), None);
-                pos.board.set(Square::from_file_rank(3, rank), Some(rook));
+                *pos.bbs.pieces_mut(piece.color, PieceKind::Rook) &= !Bitboard::from_square(Square::from_file_rank(0, rank));
+                *pos.bbs.pieces_mut(piece.color, PieceKind::Rook) |=  Bitboard::from_square(Square::from_file_rank(3, rank));
             }
         }
 
@@ -169,7 +171,7 @@ impl Position {
 
         update_castling_rights(&mut pos, mv.from, mv.to);
 
-        let is_capture = self.board.get(mv.to).is_some() || mv.kind == MoveKind::EnPassant;
+        let is_capture = self.bbs.occupancy().contains(mv.to) || mv.kind == MoveKind::EnPassant;
         if is_capture || piece.kind == PieceKind::Pawn {
             pos.halfmove_clock = 0;
         } else {
@@ -181,7 +183,6 @@ impl Position {
         }
 
         pos.side_to_move = self.side_to_move.opposite();
-        pos.bbs = BitboardSet::from_board(&pos.board);
         pos.hash = pos.compute_hash();
         pos
     }
@@ -278,7 +279,7 @@ impl Position {
             let mut empty = 0u8;
             for file in 0..8u8 {
                 let sq = Square::from_file_rank(file, rank);
-                match self.board.get(sq) {
+                match self.bbs.piece_at(sq) {
                     None => empty += 1,
                     Some(piece) => {
                         if empty > 0 {
@@ -384,7 +385,29 @@ fn parse_en_passant(s: &str) -> Result<Option<Square>, String> {
 
 impl fmt::Display for Position {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.board)?;
+        for rank in (0..8u8).rev() {
+            write!(f, "{}  ", rank + 1)?;
+            for file in 0..8u8 {
+                let sq = Square::from_file_rank(file, rank);
+                let ch = match self.bbs.piece_at(sq) {
+                    None => '.',
+                    Some(p) => {
+                        let c = match p.kind {
+                            PieceKind::Pawn   => 'p',
+                            PieceKind::Knight => 'n',
+                            PieceKind::Bishop => 'b',
+                            PieceKind::Rook   => 'r',
+                            PieceKind::Queen  => 'q',
+                            PieceKind::King   => 'k',
+                        };
+                        if p.color == Color::White { c.to_ascii_uppercase() } else { c }
+                    }
+                };
+                if file < 7 { write!(f, "{ch} ")?; } else { write!(f, "{ch}")?; }
+            }
+            writeln!(f)?;
+        }
+        write!(f, "   a b c d e f g h")?;
         let side = match self.side_to_move {
             Color::White => "White",
             Color::Black => "Black",

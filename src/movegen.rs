@@ -391,10 +391,6 @@ mod tests {
 
     #[test]
     fn knight_in_center_has_eight_moves() {
-        // Empty board, knight on e4
-        let mut pos = Position::starting_position();
-        pos.board.set(Square::from_file_rank(4, 3), Some(Piece::new(Color::White, PieceKind::Knight)));
-        // Don't count starting position knights conflicting — use isolated test position
         let pos = Position::from_fen("8/8/8/8/4N3/8/8/8 w - - 0 1").unwrap();
         let moves = generate_pseudo_legal_moves(&pos);
         assert_eq!(moves.len(), 8);

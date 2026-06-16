@@ -35,7 +35,7 @@ Primitive types shared across all modules.
   - `from_file_rank(file, rank)`, `file()`, `rank()`, `index()`, `to_algebraic()`
 
 ### `src/board.rs`
-- `Board { squares: [Option<Piece>; 64] }` — mailbox representation (retained for `make_move` and display)
+- `Board { squares: [Option<Piece>; 64] }` — mailbox representation; now only used internally by `BitboardSet::from_board` during FEN parsing; not stored in `Position`
 - `Board::empty()`, `get(sq)`, `set(sq, piece)`
 - `Board::from_fen_placement(s)` — parses the piece-placement field of a FEN string
 - `Display` impl: text grid with rank labels and `a b c d e f g h`
@@ -59,11 +59,11 @@ Bitboard infrastructure. All hot-path code now reads from here rather than the m
 Full game state. The central struct passed everywhere.
 - `CastlingRights { white_kingside, white_queenside, black_kingside, black_queenside }`
   - `CastlingRights::none()`, `CastlingRights::all()`
-- `Position { board, bbs, side_to_move, castling, en_passant, halfmove_clock, fullmove_number, hash }`
-  - `bbs: BitboardSet` kept in sync with `board` after every `make_move`
+- `Position { bbs, side_to_move, castling, en_passant, halfmove_clock, fullmove_number, hash }`
+  - `bbs: BitboardSet` updated incrementally in `make_move`; no mailbox board
   - `STARTING_FEN`, `STARTING_PLACEMENT_FEN` constants
   - `starting_position()`, `from_fen(s)`, `to_fen()`
-  - `make_move(mv) -> Position` — returns new position; immutable; rebuilds `bbs` from `board`
+  - `make_move(mv) -> Position` — returns new position; immutable; updates `bbs` incrementally via `pieces_mut`
   - `compute_hash() -> u64` — Zobrist recompute via bitboard pop_lsb iteration
   - `is_in_check(color) -> bool` — finds king via `bbs.pieces().lsb()`
   - `is_square_attacked(sq, by_color) -> bool` — bitboard attack-table lookup + ray walks
@@ -231,7 +231,7 @@ Evaluation improvements (in order):
 - [x] Mobility bonus for knights, bishops, rooks, queens (plans/mobility-eval.md)
 
 Long-term:
-- [ ] Remove mailbox `Board` from `Position` (make_move still uses it; `bbs` is rebuilt each move)
+- [x] Remove mailbox `Board` from `Position` (make_move now updates bbs incrementally)
 - [ ] Lichess bot deployment via Lichess Bot API + `--uci` mode
 - [ ] LLM experiment: board state as token sequence, move prediction as next-token generation
 

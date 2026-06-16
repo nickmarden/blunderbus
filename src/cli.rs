@@ -211,7 +211,7 @@ fn render_position(pos: &Position, pretty: bool) {
         for file in 0..8u8 {
             let sq = Square::from_file_rank(file, rank);
             let bg = if (file + rank) % 2 == 1 { LIGHT_BG } else { DARK_BG };
-            let (glyph, fg) = match pos.board.get(sq) {
+            let (glyph, fg) = match pos.bbs.piece_at(sq) {
                 Some(piece) => {
                     let fg = if piece.color == Color::White { WHITE_PIECE_FG } else { BLACK_PIECE_FG };
                     (unicode_piece(piece), fg)

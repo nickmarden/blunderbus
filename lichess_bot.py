@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import queue
+import random
 import subprocess
 import sys
 import threading
@@ -30,6 +31,9 @@ import requests
 
 API_BASE = "https://lichess.org"
 BLUNDERBUS_BIN = str(Path(__file__).parent / "target" / "release" / "blunderbus")
+
+CHALLENGE_TIMEOUT = 45.0    # seconds before a pending challenge is considered expired
+CHALLENGE_INTERVAL = 15.0   # seconds between auto-challenger loop iterations
 
 logging.basicConfig(
     level=logging.INFO,
@@ -115,6 +119,37 @@ class LichessAPI:
             f"/api/bot/game/{game_id}/chat",
             data={"room": room, "text": text},
         )
+
+    def stream_bots(self, nb: int = 50):
+        """Yield bot user dicts from the online bots endpoint."""
+        resp = self.session.get(
+            f"{API_BASE}/api/bot/online",
+            params={"nb": nb},
+            stream=True,
+            timeout=30,
+        )
+        resp.raise_for_status()
+        for raw in resp.iter_lines():
+            if raw:
+                yield json.loads(raw)
+
+    def challenge_user(self, username: str, clock_limit: int, clock_increment: int,
+                       rated: bool = True) -> dict | None:
+        """Issue a challenge to username. Returns the response JSON or None on failure."""
+        r = self.post(
+            f"/api/challenge/{username}",
+            data={
+                "rated": "true" if rated else "false",
+                "clock.limit": clock_limit,
+                "clock.increment": clock_increment,
+                "color": "random",
+                "variant": "standard",
+            },
+        )
+        if r.ok:
+            return r.json()
+        log.warning("Challenge to %s failed (%s): %s", username, r.status_code, r.text)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -325,6 +360,163 @@ class GameHandler:
 
 
 # ---------------------------------------------------------------------------
+# Instance isolation via game lock files
+# ---------------------------------------------------------------------------
+
+def _game_lock_path(bot_username: str, game_id: str) -> Path:
+    return Path(f"/tmp/blunderbus-{bot_username}-{game_id}.lock")
+
+def try_claim_game(bot_username: str, game_id: str, instance_key: str) -> bool:
+    path = _game_lock_path(bot_username, game_id)
+    try:
+        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        os.write(fd, instance_key.encode())
+        os.close(fd)
+        return True
+    except FileExistsError:
+        try:
+            return path.read_text().strip() == instance_key
+        except OSError:
+            return False
+
+def release_game(bot_username: str, game_id: str, instance_key: str):
+    path = _game_lock_path(bot_username, game_id)
+    try:
+        if path.read_text().strip() == instance_key:
+            path.unlink()
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Auto-challenger
+# ---------------------------------------------------------------------------
+
+def perf_key(clock_limit: int, clock_increment: int) -> str:
+    """Return the Lichess perf key for a given time control."""
+    estimated = clock_limit + 40 * clock_increment
+    if estimated < 30:
+        return "ultraBullet"
+    if estimated < 180:
+        return "bullet"
+    if estimated < 480:
+        return "blitz"
+    if estimated < 1500:
+        return "rapid"
+    return "classical"
+
+
+class AutoChallenger:
+    def __init__(self, api: LichessAPI, me_id: str, max_games: int,
+                 clock_limit: int, clock_increment: int, rated: bool,
+                 active_games: dict,
+                 min_elo: int | None = None, max_elo: int | None = None):
+        self.api = api
+        self.me_id = me_id
+        self.max_games = max_games
+        self.clock_limit = clock_limit
+        self.clock_increment = clock_increment
+        self.rated = rated
+        self.active_games = active_games  # shared ref; read-only for us
+        self.min_elo = min_elo
+        self.max_elo = max_elo
+        self.perf = perf_key(clock_limit, clock_increment)
+        self._pending: dict[str, float] = {}  # challenge_id -> issued_at
+        self._lock = threading.Lock()
+        log.info(
+            "AutoChallenger: %s+%s (%s), rated=%s, elo=%s-%s",
+            clock_limit, clock_increment, self.perf, rated,
+            min_elo or "any", max_elo or "any",
+        )
+
+    def on_game_start(self):
+        """A pending challenge was accepted; remove the oldest pending entry."""
+        with self._lock:
+            if self._pending:
+                oldest = min(self._pending, key=self._pending.get)
+                del self._pending[oldest]
+
+    def on_challenge_resolved(self, challenge_id: str):
+        """A challenge was declined or canceled."""
+        with self._lock:
+            self._pending.pop(challenge_id, None)
+
+    def _reap_expired(self):
+        now = time.monotonic()
+        with self._lock:
+            expired = [cid for cid, t in self._pending.items()
+                       if now - t > CHALLENGE_TIMEOUT]
+            for cid in expired:
+                log.debug("Challenge %s expired", cid)
+                del self._pending[cid]
+
+    def _slots_available(self) -> int:
+        self._reap_expired()
+        active = sum(1 for t in self.active_games.values() if t.is_alive())
+        with self._lock:
+            pending = len(self._pending)
+        return max(0, self.max_games - active - pending)
+
+    def _rating_ok(self, bot: dict) -> bool:
+        if self.min_elo is None and self.max_elo is None:
+            return True
+        perf = bot.get("perfs", {}).get(self.perf)
+        if perf is None:
+            return False  # no games at this time control; skip
+        rating = perf.get("rating", 0)
+        if self.min_elo is not None and rating < self.min_elo:
+            return False
+        if self.max_elo is not None and rating > self.max_elo:
+            return False
+        return True
+
+    def _try_challenge(self):
+        try:
+            bots = list(self.api.stream_bots(nb=50))
+        except Exception as exc:
+            log.warning("Could not fetch bot list: %s", exc)
+            return
+
+        candidates = [
+            b for b in bots
+            if b.get("id", "").lower() != self.me_id.lower()
+            and self._rating_ok(b)
+        ]
+
+        if not candidates:
+            log.info("AutoChallenger: no eligible bots found (elo filter: %s-%s %s)",
+                     self.min_elo or "any", self.max_elo or "any", self.perf)
+            return
+
+        target = random.choice(candidates)
+        username = target.get("username") or target.get("id", "?")
+        perf_data = target.get("perfs", {}).get(self.perf, {})
+        log.info("AutoChallenger: challenging %s (rating %s %s)",
+                 username, perf_data.get("rating", "?"), self.perf)
+
+        result = self.api.challenge_user(
+            username, self.clock_limit, self.clock_increment, self.rated
+        )
+        if result and "id" in result:
+            cid = result["id"]
+            with self._lock:
+                self._pending[cid] = time.monotonic()
+            log.info("AutoChallenger: challenge %s sent to %s", cid, username)
+        elif result:
+            log.warning("AutoChallenger: unexpected response: %s", result)
+
+    def run(self):
+        time.sleep(5)  # let the event stream settle before issuing challenges
+        while True:
+            try:
+                if self._slots_available() > 0:
+                    self._try_challenge()
+            except Exception as exc:
+                log.error("AutoChallenger error: %s", exc, exc_info=True)
+            time.sleep(CHALLENGE_INTERVAL)
+
+
+# ---------------------------------------------------------------------------
 # Main event loop
 # ---------------------------------------------------------------------------
 
@@ -348,7 +540,15 @@ def main():
     parser.add_argument("--candidates", type=int, default=1, help="Top-N moves to consider for strength randomization (default 1)")
     parser.add_argument("--strength", type=int, default=100, help="0-100: %% chance to pick best move vs random from top-N (default 100)")
     parser.add_argument("--max-games", type=int, default=4, help="Max concurrent games")
+    parser.add_argument("--instance-key", default=None, help="Unique key for this instance; isolates concurrent instances from each others' games")
     parser.add_argument("--debug", action="store_true", help="Log every UCI line sent/received")
+    parser.add_argument("--auto-challenge", action="store_true", help="Automatically challenge other bots when slots are free")
+    parser.add_argument("--clock-limit", type=int, default=180, help="Base time in seconds for auto-challenges (default 180)")
+    parser.add_argument("--clock-increment", type=int, default=2, help="Increment in seconds for auto-challenges (default 2)")
+    parser.add_argument("--rated", action="store_true", default=True, help="Send rated auto-challenges (default)")
+    parser.add_argument("--no-rated", dest="rated", action="store_false", help="Send unrated auto-challenges")
+    parser.add_argument("--min-elo", type=int, default=None, help="Only challenge bots with at least this rating at the chosen time control")
+    parser.add_argument("--max-elo", type=int, default=None, help="Only challenge bots with at most this rating at the chosen time control")
     args = parser.parse_args()
 
     if args.debug:
@@ -370,10 +570,16 @@ def main():
     active_games: dict[str, threading.Thread] = {}
 
     def start_game(game_id: str, color: str):
-        handler = GameHandler(api, game_id, color, args.depth,
-                              candidates=args.candidates, strength=args.strength,
-                              debug=args.debug)
-        t = threading.Thread(target=handler.run, name=f"game-{game_id}", daemon=True)
+        def run_and_release():
+            handler = GameHandler(api, game_id, color, args.depth,
+                                  candidates=args.candidates, strength=args.strength,
+                                  debug=args.debug)
+            try:
+                handler.run()
+            finally:
+                if args.instance_key:
+                    release_game(me["username"], game_id, args.instance_key)
+        t = threading.Thread(target=run_and_release, name=f"game-{game_id}", daemon=True)
         t.start()
         active_games[game_id] = t
 
@@ -381,6 +587,17 @@ def main():
         finished = [gid for gid, t in active_games.items() if not t.is_alive()]
         for gid in finished:
             del active_games[gid]
+
+    challenger: AutoChallenger | None = None
+    if args.auto_challenge:
+        challenger = AutoChallenger(
+            api, me["id"], args.max_games,
+            args.clock_limit, args.clock_increment, args.rated,
+            active_games,
+            min_elo=args.min_elo, max_elo=args.max_elo,
+        )
+        t = threading.Thread(target=challenger.run, name="auto-challenger", daemon=True)
+        t.start()
 
     log.info("Streaming events from Lichess…")
     while True:
@@ -405,12 +622,23 @@ def main():
                         log.info("Declining challenge %s (reason: %s)", cid, reason)
                         api.decline_challenge(cid, reason)
 
+                elif etype in ("challengeDeclined", "challengeCanceled"):
+                    cid = event.get("challenge", {}).get("id", "")
+                    log.info("Challenge %s %s", cid, etype)
+                    if challenger:
+                        challenger.on_challenge_resolved(cid)
+
                 elif etype == "gameStart":
                     game = event["game"]
                     game_id = game["gameId"]
                     color = game.get("color", "white")
                     if game_id not in active_games:
-                        start_game(game_id, color)
+                        if args.instance_key is None or try_claim_game(me["username"], game_id, args.instance_key):
+                            start_game(game_id, color)
+                        else:
+                            log.debug("Game %s claimed by another instance, skipping", game_id)
+                    if challenger:
+                        challenger.on_game_start()
 
                 elif etype == "gameFinish":
                     game_id = event.get("game", {}).get("gameId", "")

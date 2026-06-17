@@ -49,6 +49,97 @@ cargo run -- --depth 4 --pgn
 # Play a position from FEN (set via position.rs STARTING_FEN or future --fen-start flag)
 ```
 
+## Lichess bot
+
+blunderbus can connect to [Lichess](https://lichess.org) as a bot via `lichess_bot.py`.
+
+### Prerequisites
+
+1. A Lichess account [upgraded to BOT status](https://lichess.org/api#tag/Bot/operation/botAccountUpgrade):
+   ```bash
+   curl -X POST https://lichess.org/api/bot/account/upgrade \
+     -H "Authorization: Bearer YOUR_TOKEN"
+   ```
+   This is irreversible — the account can only be used as a bot afterward.
+
+2. An API token with the `bot:play` scope. Store it in a `.env` file in the project root:
+   ```
+   LICHESS_TOKEN=lip_xxxxxxxxxxxx
+   ```
+
+3. A release build:
+   ```bash
+   cargo build --release
+   ```
+
+4. Python dependencies (first time only):
+   ```bash
+   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+   ```
+
+### Manual mode
+
+Accept incoming challenges only — the bot sits and waits:
+
+```bash
+.venv/bin/python lichess_bot.py --depth 4
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--depth N` | 4 | Search depth in plies |
+| `--candidates N` | 1 | Top-N moves for strength randomization |
+| `--strength N` | 100 | 0–100: % chance to pick best move vs random from top-N |
+| `--max-games N` | 4 | Max concurrent games |
+| `--instance-key KEY` | off | Isolates this instance when running multiple copies (see below) |
+| `--debug` | off | Log every UCI line exchanged with the engine |
+
+### Auto-challenge mode
+
+Automatically challenge other bots whenever a slot is free:
+
+```bash
+.venv/bin/python lichess_bot.py --auto-challenge --clock-limit 180 --clock-increment 2
+```
+
+The bot fetches up to 50 online bots every 15 seconds, picks one at random that meets the ELO filter (if set), and issues a challenge. Declined or expired challenges free the slot immediately.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--auto-challenge` | off | Enable automatic outgoing challenges |
+| `--clock-limit N` | 180 | Base time in seconds (180 = 3 min) |
+| `--clock-increment N` | 2 | Increment per move in seconds |
+| `--rated` / `--no-rated` | rated | Whether challenges are rated |
+| `--min-elo N` | off | Only challenge bots rated at least N at this time control |
+| `--max-elo N` | off | Only challenge bots rated at most N at this time control |
+
+Examples:
+
+```bash
+# 3+2 blitz, target bots rated 1800–2200
+.venv/bin/python lichess_bot.py --auto-challenge \
+  --clock-limit 180 --clock-increment 2 \
+  --min-elo 1800 --max-elo 2200
+
+# 5+3 blitz, unrated, any strength
+.venv/bin/python lichess_bot.py --auto-challenge \
+  --clock-limit 300 --clock-increment 3 --no-rated
+```
+
+### Multiple instances
+
+To run two instances with different settings (e.g., different depths) without them competing for the same games, give each a unique `--instance-key`:
+
+```bash
+# Terminal 1
+.venv/bin/python lichess_bot.py --instance-key A --depth 4 --auto-challenge ...
+
+# Terminal 2
+.venv/bin/python lichess_bot.py --instance-key B --depth 8 --auto-challenge ...
+```
+
+Each instance claims its games via a lock file in `/tmp`. If you restart an instance with the same key, it picks up its in-progress games automatically.
+
 ## Architecture
 
 | Module | Role |

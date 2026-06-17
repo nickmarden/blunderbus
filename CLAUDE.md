@@ -181,6 +181,15 @@ UCI (Universal Chess Interface) protocol loop for GUI integration and Lichess bo
   - `depth N`: fixed depth; `movetime N`: Instant deadline after N ms
   - `wtime/btime/winc/binc`: time control; budget = `remaining/30 + inc/2` (min 50 ms)
 
+### `diagnose.py`
+Sweeps blunderbus across depths on a single position to diagnose whether a mistake is a search or evaluation issue.
+- `--fen FEN` (required), `--played MOVE` (the Lichess move to compare against)
+- For each depth 1–N: runs blunderbus (`go depth N`, fresh TT each call), gets SF eval of its pick
+- Caches SF evals per move to avoid redundant analysis
+- Prints cost vs SF best per depth; labels the first depth where blunderbus agrees with SF
+- Diagnosis summary: corrects at depth ≤4 = search/horizon; ≤8 = deep horizon; never = evaluation issue
+- Run: `.venv/bin/python diagnose.py --fen "FEN" --played e2e4 [--max-depth 14]`
+
 ### `lichess_accuracy.py`
 Fetches blunderbus's Lichess games and analyzes each move against Stockfish for engine tuning.
 - Fetches PGN via `/api/games/user/{username}` (filters: `--since`, `--until`, `--max`)

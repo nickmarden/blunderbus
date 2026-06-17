@@ -161,9 +161,9 @@ Each instance claims its games via a lock file in `/tmp`. If you restart an inst
 
 ## Status
 
-Working and playable. Lichess analysis of games at `--depth 4 --qdepth 6` shows ~90%+ move accuracy. Known limitation: castling through check is not detected (pseudo-legal generator allows it; legal filter only catches landing in check).
+Working and playable. Use `bench_vs_sf.py` to benchmark against Stockfish at a given ELO, `analyze_pgn.py` to analyze a single game move-by-move, and `lichess_accuracy.py` to pull Lichess games and produce an ACPL report broken down by phase and piece type for engine tuning.
 
-Planned next: transposition table, better move ordering, UCI protocol, evaluation improvements (king safety, passed pawns), and eventually the LLM experiment.
+Planned next: the LLM experiment.
 
 ## License
 

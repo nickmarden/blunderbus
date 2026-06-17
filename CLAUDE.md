@@ -181,6 +181,15 @@ UCI (Universal Chess Interface) protocol loop for GUI integration and Lichess bo
   - `depth N`: fixed depth; `movetime N`: Instant deadline after N ms
   - `wtime/btime/winc/binc`: time control; budget = `remaining/30 + inc/2` (min 50 ms)
 
+### `lichess_accuracy.py`
+Fetches blunderbus's Lichess games and analyzes each move against Stockfish for engine tuning.
+- Fetches PGN via `/api/games/user/{username}` (filters: `--since`, `--until`, `--max`)
+- Analyzes only blunderbus's moves (detects color from PGN headers)
+- Per-move cp_loss = `max(0, eval_before + eval_after_opp)` — Stockfish evals before and after each move
+- Phase detection matches `eval.rs` phase weights; cap at 1000cp for ACPL averaging
+- Output: per-game ACPL table; ACPL by phase (opening/middlegame/endgame); ACPL by piece type; worst-moves table with FENs
+- Run: `.venv/bin/python lichess_accuracy.py [--max N] [--since YYYY-MM-DD] [--movetime N] [--top N]`
+
 ### `lichess_bot.py`
 Python bot driver that connects blunderbus to the Lichess Bot API.
 - Reads `LICHESS_TOKEN` from `.env` or environment; binary path: `target/release/blunderbus`
